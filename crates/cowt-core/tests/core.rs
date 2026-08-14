@@ -267,7 +267,8 @@ fn overlay_folds_chardev_whiteouts_when_mknod_available() {
     fs::create_dir_all(&upper).unwrap();
     write(&base, "victim.txt", "gone");
 
-    if !try_mknod_whiteout(&upper.join(".wh.victim.txt")) {
+    // Kernel-style encoding: char device 0:0 carrying the victim's own name.
+    if !try_mknod_whiteout(&upper.join("victim.txt")) {
         eprintln!("mknod unavailable, skipping char-device whiteout test");
         return;
     }

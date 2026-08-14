@@ -55,6 +55,20 @@ jobs:
         run: cargo build --release
       - name: Run E2E acceptance suite
         run: bash scripts/e2e.sh ./target/release/cowt
+      - name: Probe FUSE tuning knobs (diagnostic)
+        if: always()
+        run: |
+          set -x
+          fuse-overlayfs --version
+          mkdir -p /tmp/probe/lower /tmp/probe/upper /tmp/probe/work /tmp/probe/mnt
+          for opts in "none" "writeback_cache"; do
+            extra=""; [ "$opts" = "writeback_cache" ] && extra=",writeback_cache"
+            fuse-overlayfs -o "lowerdir=/tmp/probe/lower,upperdir=/tmp/probe/upper,workdir=/tmp/probe/work$extra" /tmp/probe/mnt || continue
+            /usr/bin/time -f "opts=$opts %es seconds" dd if=/dev/zero of=/tmp/probe/mnt/big bs=4M count=128 conv=fdatasync 2>&1 | tail -1
+            rm -f /tmp/probe/mnt/big /tmp/probe/upper/big
+            fusermount3 -u /tmp/probe/mnt
+          done
+          /usr/bin/time -f "native %es seconds" dd if=/dev/zero of=/tmp/probe/lower/big bs=4M count=128 conv=fdatasync 2>&1 | tail -1
 
   cross-platform-check:
     name: cross-compile check (${{ matrix.target }})

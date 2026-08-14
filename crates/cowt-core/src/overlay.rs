@@ -79,7 +79,13 @@ pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
     Ok(manifest)
 }
 
-/// Walk `dir` looking for overlayfs whiteout character devices.
+/// Walk `dir` looking for overlayfs whiteouts.
+///
+/// Two encodings exist in the wild, and we accept both:
+///   * kernel-style: a character device `0:0` that takes the *original* file
+///     name (fuse-overlayfs with working mknod, kernel overlayfs);
+///   * `.wh.`-prefixed: a zero-size regular file or char device named
+///     `.wh.<name>` (fuse-overlayfs fallback when mknod is unavailable).
 fn collect_whiteouts(
     root: &Path,
     dir: &Path,
@@ -94,36 +100,53 @@ fn collect_whiteouts(
         let path = item.path();
         let name = item.file_name();
         let Some(name) = name.to_str() else { continue };
-        if !name.starts_with(WHITEOUT_PREFIX) {
-            if path.is_dir() {
-                collect_whiteouts(root, &path, deleted, opaque_dirs);
+
+        if name == OPAQUE_MARKER && is_whiteout(&path) {
+            if let Ok(rel) = path.strip_prefix(root) {
+                if let Some(parent) = rel.parent() {
+                    opaque_dirs.push(parent.to_path_buf());
+                }
             }
             continue;
         }
-        if !is_whiteout(&path) {
+
+        if let Some(victim_name) = name.strip_prefix(WHITEOUT_PREFIX) {
+            // `.wh.<name>` encoding (char device or zero-size regular file).
+            if is_wh_prefixed_whiteout(&path) {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    deleted.push(rel.with_file_name(victim_name));
+                }
+            }
             continue;
         }
-        let rel = match path.strip_prefix(root) {
-            Ok(r) => r.to_path_buf(),
-            Err(_) => continue,
-        };
-        if name == OPAQUE_MARKER {
-            if let Some(parent) = rel.parent() {
-                opaque_dirs.push(parent.to_path_buf());
+
+        // Kernel-style encoding: char device 0:0 with the victim's own name.
+        if is_whiteout(&path) {
+            if let Ok(rel) = path.strip_prefix(root) {
+                deleted.push(rel.to_path_buf());
             }
-        } else {
-            let victim = rel.with_file_name(&name[WHITEOUT_PREFIX.len()..]);
-            deleted.push(victim);
+            continue;
+        }
+
+        if path.is_dir() {
+            collect_whiteouts(root, &path, deleted, opaque_dirs);
         }
     }
 }
 
-/// Whiteout detection. Kernel overlayfs and privileged fuse-overlayfs use
-/// character devices with rdev 0:0; unprivileged fuse-overlayfs falls back to
-/// zero-size regular files. The `.wh.*` namespace is reserved in upper
-/// layers either way, so both encodings are accepted.
+/// Kernel-style whiteout: character device with rdev 0:0.
 #[cfg(unix)]
 fn is_whiteout(path: &Path) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    std::fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_char_device() && m.rdev() == 0)
+        .unwrap_or(false)
+}
+
+/// `.wh.`-prefixed whiteout: char device 0:0, or a zero-size regular file
+/// (fuse-overlayfs fallback when mknod is unavailable).
+#[cfg(unix)]
+fn is_wh_prefixed_whiteout(path: &Path) -> bool {
     use std::os::unix::fs::{FileTypeExt, MetadataExt};
     let Ok(m) = std::fs::symlink_metadata(path) else {
         return false;
@@ -133,5 +156,10 @@ fn is_whiteout(path: &Path) -> bool {
 
 #[cfg(not(unix))]
 fn is_whiteout(_path: &Path) -> bool {
+    false
+}
+
+#[cfg(not(unix))]
+fn is_wh_prefixed_whiteout(_path: &Path) -> bool {
     false
 }
