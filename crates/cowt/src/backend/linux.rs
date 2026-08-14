@@ -186,7 +186,13 @@ impl Backend for FuseOverlayfs {
         }
     }
 
-    fn mount(&self, lower: &Path, upper: &Path, work: &Path, mountpoint: &Path) -> Result<MountGuard> {
+    fn mount(
+        &self,
+        lower: &Path,
+        upper: &Path,
+        work: &Path,
+        mountpoint: &Path,
+    ) -> Result<MountGuard> {
         self.available()?;
         let opts = format!(
             "lowerdir={},upperdir={},workdir={}",
@@ -250,7 +256,9 @@ impl Backend for FuseOverlayfs {
         pidfile: &Path,
     ) -> Result<i32> {
         match detect_mode() {
-            Mode::KernelUserns => self.run_kernel_userns(lower, upper, work, mountpoint, cmd, pidfile),
+            Mode::KernelUserns => {
+                self.run_kernel_userns(lower, upper, work, mountpoint, cmd, pidfile)
+            }
             Mode::Fuse => self.run_fuse(lower, upper, work, mountpoint, cmd, pidfile),
         }
     }

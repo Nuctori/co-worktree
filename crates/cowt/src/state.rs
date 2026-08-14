@@ -136,7 +136,8 @@ impl State {
     }
 
     /// Pid of the running process for this worktree, if alive.
-    pub fn running_pid(dir: &Path) -> Option<u32> {        let s = fs::read_to_string(dir.join("run.pid")).ok()?;
+    pub fn running_pid(dir: &Path) -> Option<u32> {
+        let s = fs::read_to_string(dir.join("run.pid")).ok()?;
         let pid: u32 = s.trim().parse().ok()?;
         if Path::new(&format!("/proc/{pid}")).exists() {
             Some(pid)

@@ -37,7 +37,14 @@ pub fn run(args: RunArgs) -> Result<i32> {
     let upper = dir.join("upper");
     let work = dir.join("work");
     let pidfile = dir.join("run.pid");
-    let code = backend.run_isolated(&meta.target, &upper, &work, &meta.target, &args.cmd, &pidfile);
+    let code = backend.run_isolated(
+        &meta.target,
+        &upper,
+        &work,
+        &meta.target,
+        &args.cmd,
+        &pidfile,
+    );
     State::clear_running(&dir);
     let code = code?;
     eprintln!("cowt: process exited with code {code}; changes preserved in upper layer");

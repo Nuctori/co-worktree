@@ -60,15 +60,10 @@ jobs:
         run: |
           set -x
           fuse-overlayfs --version
-          mkdir -p /tmp/probe/lower /tmp/probe/upper /tmp/probe/work /tmp/probe/mnt
-          for opts in "none" "writeback_cache"; do
-            extra=""; [ "$opts" = "writeback_cache" ] && extra=",writeback_cache"
-            fuse-overlayfs -o "lowerdir=/tmp/probe/lower,upperdir=/tmp/probe/upper,workdir=/tmp/probe/work$extra" /tmp/probe/mnt || continue
-            /usr/bin/time -f "opts=$opts %es seconds" dd if=/dev/zero of=/tmp/probe/mnt/big bs=4M count=128 conv=fdatasync 2>&1 | tail -1
-            rm -f /tmp/probe/mnt/big /tmp/probe/upper/big
-            fusermount3 -u /tmp/probe/mnt
-          done
-          /usr/bin/time -f "native %es seconds" dd if=/dev/zero of=/tmp/probe/lower/big bs=4M count=128 conv=fdatasync 2>&1 | tail -1
+          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone 2>&1 || true
+          mkdir -p /tmp/kp/l /tmp/kp/u /tmp/kp/w /tmp/kp/m
+          unshare --mount --map-root-user --fork --kill-child --propagation private sh -c 'mount -t overlay overlay -o "lowerdir=$1,upperdir=$2,workdir=$3" "$4"' cowt-probe /tmp/kp/l /tmp/kp/u /tmp/kp/w /tmp/kp/m; echo "kernel-overlay probe rc=$?"
+          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true
 
   cross-platform-check:
     name: cross-compile check (${{ matrix.target }})
