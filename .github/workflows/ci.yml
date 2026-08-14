@@ -43,7 +43,7 @@ jobs:
       - run: cargo test --workspace -- --nocapture
 
   e2e:
-    name: E2E acceptance (real FUSE)
+    name: E2E acceptance (kernel-overlay)
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

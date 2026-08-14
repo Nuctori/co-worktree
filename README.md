@@ -58,7 +58,18 @@ cowt drop vscode                  # 进程在跑会拒绝；--force 先杀进程
 | 层 | 内容 |
 |---|---|
 | `cowt-core` | 纯 Rust、跨平台：Manifest（并行 BLAKE3 扫描）、Diff（Myers 行级 / JSON·YAML 键级）、三路 Merge（暂存区 + rename 原子提交） |
-| `cowt` CLI | 平台后端 Trait；Linux 后端 = fuse-overlayfs；Windows（WinFsp）/macOS（macFUSE）为规划中的后端桩 |
+| `cowt` CLI | 平台后端 Trait；Linux 后端自动选择三种模式（见下）；Windows（WinFsp）/macOS（macFUSE）为规划中的后端桩 |
+
+### Linux 后端自动选择
+
+| 模式 | 条件 | 特点 |
+|---|---|---|
+| `kernel-overlay` | root | 内核 overlayfs 直接挂载，原生性能 |
+| `kernel-overlay+userns` | 非 root + 可用 user namespace | 命名空间内内核 overlay，挂载随命名空间消亡，零残留 |
+| `fuse-overlayfs` | 兜底（如 AppArmor 限制 userns 的 Ubuntu） | 用户态，无需特权 |
+
+运行时探测，无需配置；`cowt doctor` 显示当前模式。删除操作在三种模式下均正确落为
+whiteout（char dev 0:0 原名 / `.wh.` 前缀零大小文件两种编码均支持解析）。
 
 设计决策：同步 I/O 无 async runtime（FUSE 回调模型是同步的）；零网络服务、零容器运行时，
 完全离线可用；MVP 不隔离 Windows 注册表（现代应用配置已文件化）。
@@ -72,11 +83,11 @@ cowt drop vscode                  # 进程在跑会拒绝；--force 先杀进程
 
 ## 性能（验收标准 + 实测）
 
-| 指标 | 标准 | 实测（debug / release 均满足） |
+| 指标 | 标准 | 实测 |
 |---|---|---|
 | 空 worktree fork | < 500ms | ~5ms |
 | manifest 扫描 | 支持 10k+ 文件 | 10k 文件 ~215ms |
-| 顺序读写开销 | < 20% | ~4–7% |
+| 顺序读写开销 | < 20% | kernel-overlay ~9%（CI 实测）；fuse-overlayfs 在普通 SSD 上 ~4–7% |
 | 10k 文件 diff | < 3s | ~20–200ms |
 
 ## 开发与验证
