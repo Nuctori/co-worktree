@@ -37,6 +37,40 @@ pub trait Backend: Send + Sync {
 
     /// Whether `mountpoint` currently has a filesystem mounted on it.
     fn is_mounted(&self, mountpoint: &Path) -> bool;
+
+    /// Run a command with `mountpoint` overlaid. Default: mount, spawn, wait,
+    /// unmount. Backends whose mount lives in a private namespace (kernel
+    /// overlay via user namespace) override this with a single-shot wrapper.
+    ///
+    /// The implementation writes the child pid into `pidfile` once spawned.
+    fn run_isolated(
+        &self,
+        lower: &Path,
+        upper: &Path,
+        work: &Path,
+        mountpoint: &Path,
+        cmd: &[String],
+        pidfile: &Path,
+    ) -> Result<i32> {
+        let mut guard = self.mount(lower, upper, work, mountpoint)?;
+        let mut child = std::process::Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .spawn()
+            .map_err(|e| anyhow::anyhow!("spawn '{}': {e}", cmd[0]))?;
+        write_pidfile(pidfile, child.id());
+        let result = child.wait();
+        match self.unmount(mountpoint) {
+            Ok(()) => guard.disarm(),
+            Err(e) => eprintln!("cowt: warning: unmount failed: {e:#}"),
+        }
+        let status = result.map_err(|e| anyhow::anyhow!("wait for child: {e}"))?;
+        Ok(status.code().unwrap_or(1))
+    }
+}
+
+/// Record the running child's pid (best effort — drop still verifies /proc).
+pub(crate) fn write_pidfile(path: &Path, pid: u32) {
+    let _ = std::fs::write(path, pid.to_string());
 }
 
 /// RAII guard: unmounts on drop unless explicitly disarmed (used after a

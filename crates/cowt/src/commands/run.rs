@@ -1,8 +1,6 @@
 //! `cowt run <ID> -- <CMD...>` — run a process in the merged virtual view.
 
-use std::process::Command;
-
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 
 use crate::backend::default_backend;
 use crate::state::State;
@@ -38,39 +36,10 @@ pub fn run(args: RunArgs) -> Result<i32> {
 
     let upper = dir.join("upper");
     let work = dir.join("work");
-    let mut guard = backend
-        .mount(&meta.target, &upper, &work, &meta.target)
-        .with_context(|| format!("mount overlay at {}", meta.target.display()))?;
-    eprintln!(
-        "cowt: overlay mounted at {} (upper: {})",
-        meta.target.display(),
-        upper.display()
-    );
-
-    let result = run_child(&args.cmd, &dir);
-
-    // Always unmount, whatever the child did (including crashes).
-    let unmount_result = backend.unmount(&meta.target);
+    let pidfile = dir.join("run.pid");
+    let code = backend.run_isolated(&meta.target, &upper, &work, &meta.target, &args.cmd, &pidfile);
     State::clear_running(&dir);
-    match unmount_result {
-        Ok(()) => guard.disarm(),
-        Err(e) => {
-            // Guard will retry on drop as a last resort.
-            eprintln!("cowt: warning: unmount failed: {e:#}");
-        }
-    }
-
-    let code = result?;
+    let code = code?;
     eprintln!("cowt: process exited with code {code}; changes preserved in upper layer");
     Ok(code)
-}
-
-fn run_child(cmd: &[String], dir: &std::path::Path) -> Result<i32> {
-    let mut child = Command::new(&cmd[0])
-        .args(&cmd[1..])
-        .spawn()
-        .with_context(|| format!("spawn '{}'", cmd[0]))?;
-    State::set_running(dir, child.id())?;
-    let status = child.wait().context("wait for child process")?;
-    Ok(status.code().unwrap_or(1))
 }
