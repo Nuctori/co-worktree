@@ -54,16 +54,10 @@ jobs:
       - name: Build release binary
         run: cargo build --release
       - name: Run E2E acceptance suite
-        run: bash scripts/e2e.sh ./target/release/cowt
-      - name: Probe FUSE tuning knobs (diagnostic)
-        if: always()
-        run: |
-          set -x
-          fuse-overlayfs --version
-          sysctl kernel.apparmor_restrict_unprivileged_userns kernel.unprivileged_userns_clone 2>&1 || true
-          mkdir -p /tmp/kp/l /tmp/kp/u /tmp/kp/w /tmp/kp/m
-          unshare --mount --map-root-user --fork --kill-child --propagation private sh -c 'mount -t overlay overlay -o "lowerdir=$1,upperdir=$2,workdir=$3" "$4"' cowt-probe /tmp/kp/l /tmp/kp/u /tmp/kp/w /tmp/kp/m; echo "kernel-overlay probe rc=$?"
-          cat /proc/sys/kernel/apparmor_restrict_unprivileged_userns 2>/dev/null || true
+        # sudo => kernel-overlay backend (direct mount, native performance).
+        # The unprivileged fuse-overlayfs path is covered by cargo tests above
+        # and by the kernel-userns auto-detection on hosts that allow it.
+        run: sudo -E bash scripts/e2e.sh ./target/release/cowt
 
   cross-platform-check:
     name: cross-compile check (${{ matrix.target }})

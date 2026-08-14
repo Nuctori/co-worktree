@@ -1,12 +1,13 @@
-//! Linux backend with two strategies, auto-detected per host:
+//! Linux backend with three strategies, auto-detected per host:
 //!
-//! 1. **Kernel overlayfs inside a rootless user namespace** (preferred):
-//!    `unshare --mount --map-root-user` gives us a private mount namespace
-//!    with in-namespace capabilities. Kernel overlayfs delivers near-native
-//!    I/O performance, and the mount vanishes with the namespace — zero host
-//!    residue by construction.
-//! 2. **fuse-overlayfs** (fallback): user-space overlay for hosts where
-//!    unprivileged user namespaces are unavailable.
+//! 1. **Kernel overlayfs, direct mount** (when running as root): native
+//!    kernel performance, explicit umount on exit.
+//! 2. **Kernel overlayfs inside a rootless user namespace** (unprivileged):
+//!    `unshare --mount --map-root-user` provides a private mount namespace;
+//!    the mount vanishes with the namespace — zero host residue.
+//! 3. **fuse-overlayfs** (fallback): user-space overlay for hosts where
+//!    unprivileged user namespaces are restricted (e.g. AppArmor-confined
+//!    Ubuntu runners).
 
 use std::path::Path;
 use std::process::Command;
@@ -20,16 +21,19 @@ pub struct FuseOverlayfs;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Mode {
+    KernelDirect,
     KernelUserns,
     Fuse,
 }
 
 static MODE: OnceLock<Mode> = OnceLock::new();
 
-/// Probe once whether rootless kernel overlayfs works on this host.
+/// Probe once for the best available strategy on this host.
 fn detect_mode() -> Mode {
     *MODE.get_or_init(|| {
-        if kernel_overlay_works() {
+        if euid() == 0 && kernel_direct_works() {
+            Mode::KernelDirect
+        } else if kernel_userns_works() {
             Mode::KernelUserns
         } else {
             Mode::Fuse
@@ -37,20 +41,49 @@ fn detect_mode() -> Mode {
     })
 }
 
-/// Try a real throwaway kernel-overlay mount inside a user namespace.
-fn kernel_overlay_works() -> bool {
-    let probe = std::env::temp_dir().join(format!("cowt-probe-{}", std::process::id()));
-    let (l, u, w, m) = (
-        probe.join("l"),
-        probe.join("u"),
-        probe.join("w"),
-        probe.join("m"),
-    );
-    let ok = std::fs::create_dir_all(&l).is_ok()
-        && std::fs::create_dir_all(&u).is_ok()
-        && std::fs::create_dir_all(&w).is_ok()
-        && std::fs::create_dir_all(&m).is_ok()
-        && Command::new("unshare")
+/// Effective uid parsed from /proc (avoids a libc dependency).
+fn euid() -> u32 {
+    std::fs::read_to_string("/proc/self/status")
+        .ok()
+        .and_then(|s| {
+            s.lines()
+                .find(|l| l.starts_with("Uid:"))
+                .and_then(|l| l.split_whitespace().nth(2)?.parse().ok())
+        })
+        .unwrap_or(u32::MAX)
+}
+
+/// Probe: direct kernel overlay mount (root only).
+fn kernel_direct_works() -> bool {
+    with_probe_dirs(|l, u, w, m| {
+        let ok = Command::new("mount")
+            .arg("-t")
+            .arg("overlay")
+            .arg("overlay")
+            .arg("-o")
+            .arg(format!(
+                "lowerdir={},upperdir={},workdir={}",
+                l.display(),
+                u.display(),
+                w.display()
+            ))
+            .arg(m)
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false);
+        if ok {
+            let _ = Command::new("umount").arg(m).status();
+        }
+        ok
+    })
+}
+
+/// Probe: kernel overlay inside a rootless user namespace.
+fn kernel_userns_works() -> bool {
+    with_probe_dirs(|l, u, w, m| {
+        Command::new("unshare")
             .args([
                 "--mount",
                 "--map-root-user",
@@ -63,15 +96,32 @@ fn kernel_overlay_works() -> bool {
                 "mount -t overlay overlay -o \"lowerdir=$1,upperdir=$2,workdir=$3\" \"$4\"",
                 "cowt-probe",
             ])
-            .arg(&l)
-            .arg(&u)
-            .arg(&w)
-            .arg(&m)
+            .arg(l)
+            .arg(u)
+            .arg(w)
+            .arg(m)
             .env_clear()
             .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
             .status()
             .map(|s| s.success())
-            .unwrap_or(false);
+            .unwrap_or(false)
+    })
+}
+
+fn with_probe_dirs(f: impl Fn(&Path, &Path, &Path, &Path) -> bool) -> bool {
+    let probe = std::env::temp_dir().join(format!("cowt-probe-{}", std::process::id()));
+    let (l, u, w, m) = (
+        probe.join("l"),
+        probe.join("u"),
+        probe.join("w"),
+        probe.join("m"),
+    );
+    let dirs_ok = [&l, &u, &w, &m]
+        .iter()
+        .all(|d| std::fs::create_dir_all(d).is_ok());
+    let ok = dirs_ok && f(&l, &u, &w, &m);
     let _ = std::fs::remove_dir_all(&probe);
     ok
 }
@@ -83,6 +133,53 @@ mount -t overlay overlay -o "lowerdir=$COWT_LOWER,upperdir=$COWT_UPPER,workdir=$
 exec "$@""#;
 
 impl FuseOverlayfs {
+    /// Run `cmd` with `mountpoint` overlaid via a direct kernel mount (root).
+    fn run_kernel_direct(
+        &self,
+        lower: &Path,
+        upper: &Path,
+        work: &Path,
+        mountpoint: &Path,
+        cmd: &[String],
+        pidfile: &Path,
+    ) -> Result<i32> {
+        let status = Command::new("mount")
+            .arg("-t")
+            .arg("overlay")
+            .arg("overlay")
+            .arg("-o")
+            .arg(format!(
+                "lowerdir={},upperdir={},workdir={}",
+                lower.display(),
+                upper.display(),
+                work.display()
+            ))
+            .arg(mountpoint)
+            .status()
+            .context("spawn mount")?;
+        if !status.success() {
+            bail!("kernel overlay mount failed at {}", mountpoint.display());
+        }
+        let mut guard = MountGuard::new(mountpoint.to_path_buf());
+        eprintln!(
+            "cowt: kernel overlay mounted at {} (upper: {})",
+            mountpoint.display(),
+            upper.display()
+        );
+        let mut child = Command::new(&cmd[0])
+            .args(&cmd[1..])
+            .spawn()
+            .with_context(|| format!("spawn '{}'", cmd[0]))?;
+        super::write_pidfile(pidfile, child.id());
+        let result = child.wait();
+        match self.unmount(mountpoint) {
+            Ok(()) => guard.disarm(),
+            Err(e) => eprintln!("cowt: warning: unmount failed: {e:#}"),
+        }
+        let status = result.context("wait for child process")?;
+        Ok(status.code().unwrap_or(1))
+    }
+
     /// Run `cmd` with `mountpoint` overlaid via rootless kernel overlayfs.
     fn run_kernel_userns(
         &self,
@@ -160,6 +257,7 @@ impl FuseOverlayfs {
 impl Backend for FuseOverlayfs {
     fn name(&self) -> &'static str {
         match detect_mode() {
+            Mode::KernelDirect => "kernel-overlay",
             Mode::KernelUserns => "kernel-overlay+userns",
             Mode::Fuse => "fuse-overlayfs",
         }
@@ -167,7 +265,7 @@ impl Backend for FuseOverlayfs {
 
     fn available(&self) -> Result<()> {
         match detect_mode() {
-            Mode::KernelUserns => Ok(()),
+            Mode::KernelDirect | Mode::KernelUserns => Ok(()),
             Mode::Fuse => {
                 if !Path::new("/dev/fuse").exists() {
                     bail!("/dev/fuse is missing: FUSE is not available on this host");
@@ -213,8 +311,8 @@ impl Backend for FuseOverlayfs {
     }
 
     fn unmount(&self, mountpoint: &Path) -> Result<()> {
-        // Kernel-mode mounts live in a private namespace and are never visible
-        // here; only fuse-overlayfs mounts need an explicit unmount.
+        // Userns-mode mounts live in a private namespace and are never visible
+        // here; direct kernel and fuse mounts are torn down via umount.
         if !self.is_mounted(mountpoint) {
             return Ok(());
         }
@@ -256,6 +354,9 @@ impl Backend for FuseOverlayfs {
         pidfile: &Path,
     ) -> Result<i32> {
         match detect_mode() {
+            Mode::KernelDirect => {
+                self.run_kernel_direct(lower, upper, work, mountpoint, cmd, pidfile)
+            }
             Mode::KernelUserns => {
                 self.run_kernel_userns(lower, upper, work, mountpoint, cmd, pidfile)
             }
