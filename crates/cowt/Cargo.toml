@@ -1,0 +1,23 @@
+[package]
+name = "cowt"
+description = "co-worktree CLI: Git-worktree-style isolation, review and merge for application config/data directories."
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+default-run = "cowt"
+
+[[bin]]
+name = "cowt"
+path = "src/main.rs"
+
+[dependencies]
+cowt-core = { path = "../cowt-core" }
+anyhow.workspace = true
+clap.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+serde_json.workspace = true

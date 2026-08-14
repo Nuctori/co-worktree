@@ -1,0 +1,393 @@
+//! CLI-level integration tests. FUSE-dependent cases skip automatically when
+//! no fuse-overlayfs backend is available (e.g. Windows/macOS CI runners).
+
+use std::fs;
+use std::path::PathBuf;
+use std::process::Command;
+
+use tempfile::TempDir;
+
+struct Env {
+    _tmp: TempDir,
+    home: PathBuf,
+    state: PathBuf,
+    target: PathBuf,
+}
+
+impl Env {
+    fn new() -> Env {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let state = tmp.path().join("state");
+        let target = home.join(".config/demoapp");
+        fs::create_dir_all(&target).unwrap();
+        fs::write(target.join("config.txt"), "alpha\nbeta\n").unwrap();
+        fs::write(target.join("prefs.json"), r#"{"a": 1, "b": 2}"#).unwrap();
+        fs::write(target.join("stale.cache"), "stale").unwrap();
+        Env {
+            _tmp: tmp,
+            home,
+            state,
+            target,
+        }
+    }
+
+    fn cowt(&self) -> Command {
+        let mut c = Command::new(env!("CARGO_BIN_EXE_cowt"));
+        c.env("HOME", &self.home)
+            .env("COWT_HOME", &self.state)
+            // Deterministic PATH: cargo test inherits a full PATH which is
+            // fine, but we must not leak a caller's COWT state.
+            .env_remove("XDG_STATE_HOME");
+        c
+    }
+
+    fn fork(&self) -> String {
+        let out = self
+            .cowt()
+            .args(["fork", self.target.to_str().unwrap(), "--name", "demo"])
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "fork failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        "demo".to_string()
+    }
+
+    fn upper(&self) -> PathBuf {
+        // Resolve id via list --json.
+        let out = self.cowt().args(["list", "--json"]).output().unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("list --json parses");
+        let id = v[0]["id"].as_str().unwrap();
+        self.state.join(id).join("upper")
+    }
+
+    fn fuse_available(&self) -> bool {
+        let out = self.cowt().arg("doctor").output().unwrap();
+        String::from_utf8_lossy(&out.stdout).contains("available: yes")
+    }
+}
+
+#[test]
+fn fork_creates_metadata_only_worktree() {
+    let env = Env::new();
+    env.fork();
+    let out = env.cowt().args(["list", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v.as_array().unwrap().len(), 1);
+    assert_eq!(v[0]["name"], "demo");
+    assert_eq!(v[0]["status"], "ready");
+    // Upper must be empty: no data copied at fork time.
+    assert_eq!(fs::read_dir(env.upper()).unwrap().count(), 0);
+}
+
+#[test]
+fn fork_refuses_directories_outside_home() {
+    let env = Env::new();
+    let outside = env.state.parent().unwrap().join("etc-like");
+    fs::create_dir_all(&outside).unwrap();
+    let out = env
+        .cowt()
+        .args(["fork", outside.to_str().unwrap()])
+        .output()
+        .unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("$HOME"));
+}
+
+#[test]
+fn diff_and_apply_without_fuse_via_upper_layer() {
+    let env = Env::new();
+    env.fork();
+    let upper = env.upper();
+
+    // Simulate what an isolated process would have written.
+    fs::write(upper.join("config.txt"), "alpha\nGAMMA\n").unwrap();
+    fs::write(upper.join("prefs.json"), r#"{"a": 1, "b": 3, "c": 4}"#).unwrap();
+    fs::write(upper.join(".wh.stale.cache"), "").unwrap(); // whiteout
+    fs::create_dir_all(upper.join("newdir")).unwrap();
+    fs::write(upper.join("newdir/new.txt"), "fresh").unwrap();
+
+    // diff --json
+    let out = env
+        .cowt()
+        .args(["diff", "demo", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let changes: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let find = |p: &str| {
+        changes
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|c| c["path"] == p)
+            .cloned()
+    };
+    assert_eq!(find("config.txt").unwrap()["kind"], "modified");
+    assert_eq!(find("prefs.json").unwrap()["kind"], "modified");
+    assert_eq!(find("stale.cache").unwrap()["kind"], "deleted");
+    assert_eq!(find("newdir/new.txt").unwrap()["kind"], "added");
+
+    // apply
+    let out = env.cowt().args(["apply", "demo"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "apply failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(env.target.join("config.txt")).unwrap(),
+        "alpha\nGAMMA\n"
+    );
+    assert!(!env.target.join("stale.cache").exists());
+    assert_eq!(
+        fs::read_to_string(env.target.join("newdir/new.txt")).unwrap(),
+        "fresh"
+    );
+    let prefs: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(env.target.join("prefs.json")).unwrap()).unwrap();
+    assert_eq!(prefs["b"], 3);
+    assert_eq!(prefs["c"], 4);
+}
+
+#[test]
+fn apply_conflict_aborts_with_zero_pollution_and_exit_3() {
+    let env = Env::new();
+    env.fork();
+    let upper = env.upper();
+
+    // Worktree changes the file; host changes it too, differently.
+    fs::write(upper.join("config.txt"), "worktree-version\n").unwrap();
+    fs::write(env.target.join("config.txt"), "host-version\n").unwrap();
+    // A clean change that must NOT be written either (atomic abort).
+    fs::write(upper.join("clean.txt"), "clean\n").unwrap();
+
+    let out = env
+        .cowt()
+        .args(["apply", "demo", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["status"], "conflict");
+    let conflicts = v["conflicts"].as_array().unwrap();
+    assert_eq!(conflicts.len(), 1);
+    assert_eq!(conflicts[0]["path"], "config.txt");
+    assert_eq!(conflicts[0]["kind"], "both_modified");
+    assert!(conflicts[0]["base_hash"].is_string());
+    assert!(conflicts[0]["current_hash"].is_string());
+    assert!(conflicts[0]["work_hash"].is_string());
+
+    // Zero pollution.
+    assert_eq!(
+        fs::read_to_string(env.target.join("config.txt")).unwrap(),
+        "host-version\n"
+    );
+    assert!(!env.target.join("clean.txt").exists());
+
+    // --dry-run reports the same conflict without writing.
+    let out = env
+        .cowt()
+        .args(["apply", "demo", "--dry-run", "--json"])
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(3));
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert_eq!(v["conflicts"].as_array().unwrap().len(), 1);
+}
+
+#[test]
+fn drop_removes_all_state() {
+    let env = Env::new();
+    env.fork();
+    let out = env.cowt().args(["drop", "demo"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "drop failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(fs::read_dir(&env.state).unwrap().count(), 0);
+    // Host untouched.
+    assert_eq!(
+        fs::read_to_string(env.target.join("config.txt")).unwrap(),
+        "alpha\nbeta\n"
+    );
+}
+
+#[test]
+fn fuse_full_lifecycle() {
+    let env = Env::new();
+    if !env.fuse_available() {
+        eprintln!("fuse-overlayfs unavailable; skipping");
+        return;
+    }
+    env.fork();
+
+    // Isolated run: modify, delete, create.
+    let script = r#"
+        cd "$HOME/.config/demoapp" || exit 1
+        sed -i 's/beta/BETA/' config.txt
+        rm stale.cache
+        echo isolated > isolated.txt
+    "#;
+    let out = env
+        .cowt()
+        .args(["run", "demo", "--", "sh", "-c", script])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "run failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+
+    // Host must be untouched during/after run.
+    assert_eq!(
+        fs::read_to_string(env.target.join("config.txt")).unwrap(),
+        "alpha\nbeta\n"
+    );
+    assert!(env.target.join("stale.cache").exists());
+
+    // Diff sees exactly the isolated changes.
+    let out = env
+        .cowt()
+        .args(["diff", "demo", "--json"])
+        .output()
+        .unwrap();
+    let changes: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let kinds: std::collections::BTreeMap<String, String> = changes
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|c| {
+            (
+                c["path"].as_str().unwrap().to_string(),
+                c["kind"].as_str().unwrap().to_string(),
+            )
+        })
+        .collect();
+    assert_eq!(
+        kinds.get("config.txt").map(String::as_str),
+        Some("modified")
+    );
+    assert_eq!(
+        kinds.get("stale.cache").map(String::as_str),
+        Some("deleted")
+    );
+    assert_eq!(kinds.get("isolated.txt").map(String::as_str), Some("added"));
+
+    // Apply merges them into the host.
+    let out = env.cowt().args(["apply", "demo"]).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(
+        fs::read_to_string(env.target.join("config.txt")).unwrap(),
+        "alpha\nBETA\n"
+    );
+    assert!(!env.target.join("stale.cache").exists());
+    assert_eq!(
+        fs::read_to_string(env.target.join("isolated.txt")).unwrap(),
+        "isolated\n"
+    );
+
+    // Drop leaves zero residue.
+    let out = env.cowt().args(["drop", "demo"]).output().unwrap();
+    assert!(out.status.success());
+    assert_eq!(fs::read_dir(&env.state).unwrap().count(), 0);
+}
+
+#[test]
+fn fuse_crash_preserves_upper() {
+    let env = Env::new();
+    if !env.fuse_available() {
+        eprintln!("fuse-overlayfs unavailable; skipping");
+        return;
+    }
+    env.fork();
+    // Process writes then kills itself with SIGKILL.
+    let out = env
+        .cowt()
+        .args([
+            "run",
+            "demo",
+            "--",
+            "sh",
+            "-c",
+            "echo crash-data > \"$HOME/.config/demoapp/crash.txt\"; kill -9 $$",
+        ])
+        .output()
+        .unwrap();
+    // Non-zero exit (killed), but the run command itself must handle it.
+    assert_ne!(out.status.code(), Some(0));
+
+    // Upper data intact and diffable.
+    let out = env
+        .cowt()
+        .args(["diff", "demo", "--json"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    let changes: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    assert!(changes
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|c| c["path"] == "crash.txt" && c["kind"] == "added"));
+    // Host still untouched.
+    assert!(!env.target.join("crash.txt").exists());
+}
+
+#[test]
+fn drop_refuses_while_running() {
+    let env = Env::new();
+    if !env.fuse_available() {
+        eprintln!("fuse-overlayfs unavailable; skipping");
+        return;
+    }
+    env.fork();
+
+    // Start a long-running process in the background.
+    let mut child = env
+        .cowt()
+        .args(["run", "demo", "--", "sleep", "30"])
+        .spawn()
+        .unwrap();
+    // Wait until the pidfile appears.
+    let state_dir = env.state.clone();
+    let mut pid_seen = false;
+    for _ in 0..50 {
+        let entries: Vec<_> = fs::read_dir(&state_dir).unwrap().flatten().collect();
+        if let Some(d) = entries.first() {
+            if d.path().join("run.pid").exists() {
+                pid_seen = true;
+                break;
+            }
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    assert!(pid_seen, "run.pid never appeared");
+
+    // drop without --force must refuse.
+    let out = env.cowt().args(["drop", "demo"]).output().unwrap();
+    assert!(!out.status.success());
+    assert!(String::from_utf8_lossy(&out.stderr).contains("running"));
+
+    // drop --force kills and cleans up.
+    let out = env
+        .cowt()
+        .args(["drop", "demo", "--force"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "force drop failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let _ = child.wait();
+    assert_eq!(fs::read_dir(&env.state).unwrap().count(), 0);
+    // Mount gone.
+    let mounts = fs::read_to_string("/proc/self/mounts").unwrap();
+    assert!(!mounts.contains(env.target.to_str().unwrap()));
+}
