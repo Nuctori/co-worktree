@@ -127,11 +127,15 @@ pub fn whiteout_victims(upper: &Path) -> Vec<PathBuf> {
     deleted
 }
 
-/// True if any base entry is `rel` itself or strictly below it — a
-/// dir-replacement must prune those; a plain file update has none and
-/// stays O(1).
+/// True if the base has a directory at `rel` — the only case where a
+/// non-dir replacement must shadow a subtree. A plain file update (or a
+/// new file inside a replaced dir, which cannot exist without the dir
+/// itself being replaced) matches nothing, keeping the hot path O(1).
 fn base_has_descendant(base: &Manifest, rel: &Path) -> bool {
-    base.entries.keys().any(|p| p.starts_with(rel))
+    base.entries
+        .get(rel)
+        .map(|e| e.kind == EntryKind::Dir)
+        .unwrap_or(false)
 }
 
 /// Walk `dir` looking for overlayfs whiteouts.
