@@ -453,7 +453,6 @@ fn e2e_run_diff_apply() {
         "key diff missing:\n{content}"
     );
 
-
     // Clean apply: base == current, worktree changed.
     env.cowt_ok(&["apply", &id]);
     assert_eq!(

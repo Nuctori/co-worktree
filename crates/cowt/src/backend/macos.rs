@@ -129,10 +129,7 @@ impl CowFs {
         }
         // Whiteout check: a `.wh.<name>` in upper means the lower entry was
         // deleted in the worktree.
-        let (parent, name) = (
-            rel.parent().unwrap_or(Path::new("")),
-            rel.file_name()?,
-        );
+        let (parent, name) = (rel.parent().unwrap_or(Path::new("")), rel.file_name()?);
         if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
             let needle = name.to_string_lossy().to_lowercase();
             for e in rd.flatten() {
@@ -373,9 +370,16 @@ impl Filesystem for CowFs {
         _umask: u32,
         reply: ReplyEntry,
     ) {
+        let Some(rel) = self
+            .inos
+            .lock()
+            .unwrap()
+            .path_of(parent)
+            .map(|p| p.join(name))
         else {
             return reply.error(libc::ENOENT);
         };
+        self.clear_whiteout(&rel);
         self.clear_whiteout(&rel);
         if let Err(e) = fs::create_dir_all(self.upper_of(&rel)) {
             return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
