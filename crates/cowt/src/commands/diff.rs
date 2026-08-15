@@ -4,6 +4,7 @@ use anyhow::{bail, Result};
 use cowt_core::diff::{self, Change, ChangeKind, ContentDiff};
 use cowt_core::{overlay, Manifest};
 
+use crate::backend::{default_backend, recover_stale_mount};
 use crate::state::State;
 
 pub struct DiffArgs {
@@ -23,6 +24,9 @@ pub fn diff_cmd(args: DiffArgs) -> Result<()> {
             meta.id
         );
     }
+    // A stale mount (crashed `cowt run`) must be restored first: on Windows a
+    // dangling junction would make the target scan come up empty.
+    recover_stale_mount(default_backend().as_ref(), &dir, &meta.target)?;
 
     let base = State::load_manifest(&dir)?;
     let upper = dir.join("upper");

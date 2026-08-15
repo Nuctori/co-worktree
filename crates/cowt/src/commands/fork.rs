@@ -26,7 +26,10 @@ pub fn fork(args: ForkArgs) -> Result<()> {
 
     // Boundary: only user-level directories are isolated by default.
     if !args.force_path {
-        if let Some(home) = std::env::var_os("HOME").map(PathBuf::from) {
+        if let Some(home) = crate::state::home_dir() {
+            // canonicalize() both sides: on Windows it emits a `\\?\` extended
+            // prefix that would otherwise break prefix comparison.
+            let home = home.canonicalize().unwrap_or(home);
             if !target.starts_with(&home) {
                 bail!(
                     "refusing to isolate {}: only directories under $HOME are supported\n\

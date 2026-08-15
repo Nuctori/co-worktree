@@ -123,7 +123,8 @@ fn diff_and_apply_without_fuse_via_upper_layer() {
             .as_array()
             .unwrap()
             .iter()
-            .find(|c| c["path"] == p)
+            // Windows serializes paths with `\`; normalize both sides.
+            .find(|c| c["path"].as_str().unwrap().replace('\\', "/") == p)
             .cloned()
     };
     assert_eq!(find("config.txt").unwrap()["kind"], "modified");
@@ -217,27 +218,116 @@ fn drop_removes_all_state() {
     );
 }
 
+/// Platform-appropriate commands that mutate files inside the isolated view.
+fn mutate_cmd(target: &std::path::Path) -> Vec<String> {
+    #[cfg(unix)]
+    {
+        let script = format!(
+            "cd \"{}\" || exit 1\nsed -i 's/beta/BETA/' config.txt\nrm stale.cache\necho isolated > isolated.txt",
+            target.display()
+        );
+        vec!["sh".into(), "-c".into(), script]
+    }
+    #[cfg(windows)]
+    {
+        let d = target.display().to_string().replace('/', "\\");
+        let script = format!(
+            "$d='{d}'; (Get-Content \"$d\\config.txt\") -replace 'beta','BETA' | Set-Content \"$d\\config.txt\"; Remove-Item \"$d\\stale.cache\"; Set-Content \"$d\\isolated.txt\" -Value 'isolated'"
+        );
+        vec![
+            "powershell".into(),
+            "-NoProfile".into(),
+            "-Command".into(),
+            script,
+        ]
+    }
+}
+
+/// Command that writes a file then dies without any cleanup (SIGKILL / abort).
+fn crash_cmd(target: &std::path::Path) -> Vec<String> {
+    #[cfg(unix)]
+    {
+        vec![
+            "sh".into(),
+            "-c".into(),
+            format!(
+                "echo crash-data > \"{}/crash.txt\"; kill -9 $$",
+                target.display()
+            ),
+        ]
+    }
+    #[cfg(windows)]
+    {
+        vec![
+            "powershell".into(),
+            "-NoProfile".into(),
+            "-Command".into(),
+            format!(
+                "Set-Content -Path '{}\\crash.txt' -Value 'crash-data'; exit 99",
+                target.display()
+            ),
+        ]
+    }
+}
+
+/// A long-running command for background runs.
+fn sleep_cmd() -> Vec<String> {
+    #[cfg(unix)]
+    {
+        vec!["sleep".into(), "30".into()]
+    }
+    #[cfg(windows)]
+    {
+        vec![
+            "powershell".into(),
+            "-NoProfile".into(),
+            "-Command".into(),
+            "Start-Sleep -Seconds 30".into(),
+        ]
+    }
+}
+
+/// Assert that nothing is mounted / junctioned at `target` anymore.
+#[cfg(target_os = "linux")]
+fn assert_mount_gone(target: &std::path::Path) {
+    let mounts = fs::read_to_string("/proc/self/mounts").unwrap();
+    assert!(!mounts.contains(target.to_str().unwrap()));
+}
+
+#[cfg(target_os = "macos")]
+fn assert_mount_gone(target: &std::path::Path) {
+    let out = std::process::Command::new("mount").output().unwrap();
+    let text = String::from_utf8_lossy(&out.stdout);
+    assert!(!text.contains(&format!(" on {} ", target.display())));
+}
+
+#[cfg(windows)]
+fn assert_mount_gone(target: &std::path::Path) {
+    // The junction is removed on teardown; the target is a plain dir again.
+    use std::os::windows::fs::MetadataExt;
+    let meta = fs::symlink_metadata(target).expect("target dir exists");
+    assert!(meta.is_dir());
+    assert_eq!(
+        meta.file_attributes() & 0x400, /* FILE_ATTRIBUTE_REPARSE_POINT */
+        0,
+        "target still a reparse point (junction)"
+    );
+}
+
 #[test]
 fn fuse_full_lifecycle() {
     let env = Env::new();
     if !env.fuse_available() {
-        eprintln!("fuse-overlayfs unavailable; skipping");
+        eprintln!("backend unavailable; skipping");
         return;
     }
     env.fork();
 
     // Isolated run: modify, delete, create.
-    let script = r#"
-        cd "$HOME/.config/demoapp" || exit 1
-        sed -i 's/beta/BETA/' config.txt
-        rm stale.cache
-        echo isolated > isolated.txt
-    "#;
-    let out = env
-        .cowt()
-        .args(["run", "demo", "--", "sh", "-c", script])
-        .output()
-        .unwrap();
+    let cmd = mutate_cmd(&env.target);
+    let mut cowt = env.cowt();
+    cowt.args(["run", "demo", "--"]).args(&cmd);
+    let out = cowt.output().unwrap();
     assert!(
         out.status.success(),
         "run failed: {}",
@@ -306,19 +396,11 @@ fn fuse_crash_preserves_upper() {
         return;
     }
     env.fork();
-    // Process writes then kills itself with SIGKILL.
-    let out = env
-        .cowt()
-        .args([
-            "run",
-            "demo",
-            "--",
-            "sh",
-            "-c",
-            "echo crash-data > \"$HOME/.config/demoapp/crash.txt\"; kill -9 $$",
-        ])
-        .output()
-        .unwrap();
+    // Process writes then dies without any cleanup (SIGKILL on unix).
+    let cmd = crash_cmd(&env.target);
+    let mut cowt = env.cowt();
+    cowt.args(["run", "demo", "--"]).args(&cmd);
+    let out = cowt.output().unwrap();
     // Non-zero exit (killed), but the run command itself must handle it.
     assert_ne!(out.status.code(), Some(0));
 
@@ -349,11 +431,10 @@ fn drop_refuses_while_running() {
     env.fork();
 
     // Start a long-running process in the background.
-    let mut child = env
-        .cowt()
-        .args(["run", "demo", "--", "sleep", "30"])
-        .spawn()
-        .unwrap();
+    let cmd = sleep_cmd();
+    let mut cowt = env.cowt();
+    cowt.args(["run", "demo", "--"]).args(&cmd);
+    let mut child = cowt.spawn().unwrap();
     // Wait until the pidfile appears.
     let state_dir = env.state.clone();
     let mut pid_seen = false;
@@ -387,7 +468,6 @@ fn drop_refuses_while_running() {
     );
     let _ = child.wait();
     assert_eq!(fs::read_dir(&env.state).unwrap().count(), 0);
-    // Mount gone.
-    let mounts = fs::read_to_string("/proc/self/mounts").unwrap();
-    assert!(!mounts.contains(env.target.to_str().unwrap()));
+    // Mount / junction gone.
+    assert_mount_gone(&env.target);
 }

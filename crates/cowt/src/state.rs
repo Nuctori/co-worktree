@@ -43,15 +43,14 @@ pub struct State {
 }
 
 impl State {
-    /// State root: `$COWT_HOME` if set, else `~/.local/state/cowt`.
+    /// State root: `$COWT_HOME` if set, else a per-user default
+    /// (`~/.local/state/cowt` on unix, `%LOCALAPPDATA%\cowt` on Windows).
     pub fn open() -> Result<Self> {
         let root = match std::env::var_os("COWT_HOME") {
             Some(p) => PathBuf::from(p),
             None => {
-                let home = std::env::var_os("HOME")
-                    .map(PathBuf::from)
-                    .context("HOME is not set and COWT_HOME was not provided")?;
-                home.join(".local/state/cowt")
+                let home = home_dir().context("HOME is not set and COWT_HOME was not provided")?;
+                default_state_dir(&home)
             }
         };
         fs::create_dir_all(&root)
@@ -139,11 +138,19 @@ impl State {
     pub fn running_pid(dir: &Path) -> Option<u32> {
         let s = fs::read_to_string(dir.join("run.pid")).ok()?;
         let pid: u32 = s.trim().parse().ok()?;
-        if Path::new(&format!("/proc/{pid}")).exists() {
+        if pid_alive(pid) {
             Some(pid)
         } else {
             None
         }
+    }
+
+    /// True when a previous `cowt run` left its pidfile behind but the
+    /// process is gone — i.e. the run crashed or was killed. This is the
+    /// discriminator that makes stale-mount cleanup safe: the mount at the
+    /// target (if any) can only be our own leftover.
+    pub fn stale_run(dir: &Path) -> bool {
+        dir.join("run.pid").is_file() && Self::running_pid(dir).is_none()
     }
 
     pub fn clear_running(dir: &Path) {
@@ -169,6 +176,60 @@ pub fn short_id() -> String {
 
 fn hex(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02x}")).collect()
+}
+
+/// User home directory: `$HOME`, falling back to `%USERPROFILE%` on Windows
+/// (where `HOME` is commonly unset).
+pub fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from).or_else(|| {
+        #[cfg(windows)]
+        {
+            std::env::var_os("USERPROFILE").map(PathBuf::from)
+        }
+        #[cfg(not(windows))]
+        {
+            None
+        }
+    })
+}
+
+/// Platform default state dir below `home`.
+#[cfg(not(windows))]
+fn default_state_dir(home: &Path) -> PathBuf {
+    home.join(".local/state/cowt")
+}
+
+#[cfg(windows)]
+fn default_state_dir(home: &Path) -> PathBuf {
+    std::env::var_os("LOCALAPPDATA")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| home.join(".cowt"))
+        .join("cowt")
+}
+
+/// Portable pid liveness probe: `kill -0` on unix (works on macOS too, where
+/// there is no /proc), `OpenProcess` on Windows.
+#[cfg(unix)]
+pub(crate) fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .arg("-0")
+        .arg(pid.to_string())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+pub(crate) fn pid_alive(pid: u32) -> bool {
+    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
+    let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) };
+    if let Ok(h) = handle {
+        let _ = unsafe { CloseHandle(h) };
+        true
+    } else {
+        false
+    }
 }
 
 /// Derive a worktree name slug from the target path, e.g. `/home/u/.config/code` -> `config-code`.

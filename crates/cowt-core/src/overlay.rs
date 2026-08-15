@@ -159,7 +159,11 @@ fn is_whiteout(_path: &Path) -> bool {
     false
 }
 
+/// Windows: no character devices; the backend encodes deletions as `.wh.<name>`
+/// zero-size regular files (same convention as the fuse-overlayfs fallback).
 #[cfg(not(unix))]
-fn is_wh_prefixed_whiteout(_path: &Path) -> bool {
-    false
+fn is_wh_prefixed_whiteout(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.is_file() && m.len() == 0)
+        .unwrap_or(false)
 }

@@ -18,6 +18,30 @@ clap.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 
+# Windows backend: WinFsp user-mode filesystem (CoW passthrough). The crate
+# bundles an import library, so cross-compile checks need no WinFsp install;
+# runtime needs the WinFsp DLL (installed via the WinFsp installer/choco).
+# `delayload` keeps the binary loadable without WinFsp so `cowt doctor` can
+# report availability instead of failing at startup.
+# Note: winfsp/winfsp-sys are GPL-3.0; the WinFsp DLL itself is GPLv3 with a
+# FLOSS linking exception (see README "License" note).
+[target.'cfg(windows)'.dependencies]
+winfsp = { version = "0.12", default-features = false, features = [
+  "delayload",
+] }
+windows = { version = "0.61", features = [
+  "Win32_Foundation",
+  "Win32_Security",
+  "Win32_System_Threading",
+  "Win32_Storage_FileSystem",
+] }
+junction = "1.2"
+
+[target.'cfg(windows)'.build-dependencies]
+winfsp = { version = "0.12", default-features = false, features = [
+  "delayload",
+] }
+
 [dev-dependencies]
 tempfile = "3"
 serde_json.workspace = true

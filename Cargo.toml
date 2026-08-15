@@ -7,7 +7,8 @@ version = "0.1.0"
 edition = "2021"
 license = "MIT"
 repository = "https://github.com/co-worktree/co-worktree"
-rust-version = "1.83"
+# 1.87: the Windows backend depends on winfsp (edition 2024, MSRV 1.87).
+rust-version = "1.87"
 
 [workspace.dependencies]
 anyhow = "1"

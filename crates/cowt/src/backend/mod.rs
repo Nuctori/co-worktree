@@ -9,8 +9,12 @@ use anyhow::Result;
 
 #[cfg(target_os = "linux")]
 pub mod linux;
+#[cfg(target_os = "macos")]
+pub mod macos;
 #[allow(dead_code)]
 pub mod unsupported;
+#[cfg(target_os = "windows")]
+pub mod winfsp;
 
 /// A virtual filesystem backend: mounts a merged view whose writes are
 /// redirected to an isolated upper layer.
@@ -74,10 +78,15 @@ pub(crate) fn write_pidfile(path: &Path, pid: u32) {
 }
 
 /// RAII guard: unmounts on drop unless explicitly disarmed (used after a
-/// deliberate unmount to make error paths idempotent).
+/// deliberate unmount to make error paths idempotent). On Windows the guard
+/// additionally owns the WinFsp mount host, so the filesystem is torn down
+/// exactly when the guard drops.
 pub struct MountGuard {
     mountpoint: std::path::PathBuf,
     armed: bool,
+    #[cfg(windows)]
+    #[allow(dead_code)] // written once, read by Drop semantics
+    host: Option<winfsp::CowtHost>,
 }
 
 impl MountGuard {
@@ -87,6 +96,18 @@ impl MountGuard {
         Self {
             mountpoint,
             armed: true,
+            #[cfg(windows)]
+            host: None,
+        }
+    }
+
+    /// Windows-only: wrap an already-mounted WinFsp host.
+    #[cfg(windows)]
+    pub fn with_host(mountpoint: std::path::PathBuf, host: winfsp::CowtHost) -> Self {
+        Self {
+            mountpoint,
+            armed: true,
+            host: Some(host),
         }
     }
 
@@ -112,17 +133,11 @@ pub fn default_backend() -> Box<dyn Backend> {
     }
     #[cfg(target_os = "windows")]
     {
-        Box::new(unsupported::Unsupported::new(
-            "winfsp",
-            "Windows support is planned via WinFsp; the MVP ships Linux first.",
-        ))
+        Box::new(winfsp::WinFspBackend)
     }
     #[cfg(target_os = "macos")]
     {
-        Box::new(unsupported::Unsupported::new(
-            "macfuse",
-            "macOS support is planned via macFUSE; the MVP ships Linux first.",
-        ))
+        Box::new(macos::Union)
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {
@@ -136,4 +151,33 @@ pub fn default_backend() -> Box<dyn Backend> {
 /// Best-effort unmount used by guards and cleanup paths.
 pub fn unmount_best_effort(mountpoint: &Path) -> Result<()> {
     default_backend().unmount(mountpoint)
+}
+
+/// Shared stale-mount gate for `run` / `diff` / `apply`.
+///
+/// A mount at `target` is only ever torn down when the worktree's own
+/// pidfile proves a previous `cowt run` died (crashed or killed): that makes
+/// the mount ours by construction. Anything else — a live run that has not
+/// written its pidfile yet, or a foreign mount (manual mount, another tool)
+/// — refuses, preserving the original "already a mountpoint" semantics.
+///
+/// Returns `true` when a stale mount was cleaned up.
+pub fn recover_stale_mount(
+    backend: &dyn Backend,
+    dir: &std::path::Path,
+    target: &Path,
+) -> Result<bool> {
+    if !backend.is_mounted(target) {
+        return Ok(false);
+    }
+    if crate::state::State::stale_run(dir) {
+        eprintln!("cowt: removing stale mount at {}", target.display());
+        backend.unmount(target)?;
+        Ok(true)
+    } else {
+        anyhow::bail!(
+            "{} is already a mountpoint; refusing to stack a second overlay",
+            target.display()
+        )
+    }
 }

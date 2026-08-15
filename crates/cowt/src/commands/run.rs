@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Result};
 
-use crate::backend::default_backend;
+use crate::backend::{default_backend, recover_stale_mount};
 use crate::state::State;
 
 pub struct RunArgs {
@@ -27,12 +27,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
             meta.id
         );
     }
-    if backend.is_mounted(&meta.target) {
-        bail!(
-            "{} is already a mountpoint; refusing to stack a second overlay",
-            meta.target.display()
-        );
-    }
+    recover_stale_mount(backend.as_ref(), &dir, &meta.target)?;
 
     let upper = dir.join("upper");
     let work = dir.join("work");

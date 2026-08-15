@@ -3,6 +3,7 @@
 use anyhow::{bail, Result};
 use cowt_core::{merge, overlay, Manifest};
 
+use crate::backend::{default_backend, recover_stale_mount};
 use crate::state::{State, Status};
 
 pub struct ApplyArgs {
@@ -21,6 +22,9 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
             meta.id
         );
     }
+    // Never merge into a live or stale mount: the write must land in the
+    // real host directory. Stale leftovers (crashed run) are restored first.
+    recover_stale_mount(default_backend().as_ref(), &dir, &meta.target)?;
 
     let base = State::load_manifest(&dir)?;
     let upper = dir.join("upper");

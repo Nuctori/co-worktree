@@ -1,0 +1,39 @@
+{
+  "lastAuditedId": "D-004",
+  "inFlight": false,
+  "convExtractedLine": 78,
+  "lastAuditAt": 1786753073255,
+  "signature": {
+    "status": "blocked",
+    "at": 1786753073255,
+    "blockers": [
+      "crates/cowt/src/commands/run.rs（is_mounted 分支，约 L30-41）：stale-mount 自动卸载无鉴别。① 行为退化：旧语义是『已挂载 → 拒绝叠加』（安全失败），新代码在无 live pid 时自动调用 backend.unmount()——Linux/macOS 后端的 unmount 是裸 umount，会卸载用户手动挂载或其他工具挂载的任意目录（cowt run 在 root 下运行时风险更高）；Windows 有 view 判定保护（只卸指向 state/<id>/view 的 junction），Linux/macOS 无任何鉴别。② 并发竞态：两个并发 `cowt run` 同一 worktree 时，进程 A 完成 mount 但尚未 write_pidfile（默认 run_isolated 顺序 mount→spawn→write_pidfile），进程 B 看到 is_mounted 且 running_pid 为空 → 卸载 A 的活挂载，A 的 child 写入落到无隔离的宿主目录。修复建议：仅当 run.pid 文件存在且 State::running_pid 为 None（明确崩溃残留）时才自动清理；否则维持原 bail『已挂载，拒绝叠加』。修复后验证：并发 run 拒绝语义、崩溃后自动恢复、非 cowt 挂载不被触碰（可在 e2e 或 cli.rs 补一用例：手动挂载后 run 应 bail）。"
+    ],
+    "runId": "",
+    "head": "313d3786abaf16b5b5a1f9f8c45fa74a7739301b"
+  },
+  "signatureConvLine": 78,
+  "blockedStreak": 0,
+  "auditFindings": [
+    "审计开始（run-17816 首审）",
+    "目标（convlog 用户原话）：让项目支持 win+mac，用 github ci 做 E2E 验证",
+    "产物形态：全部为未提交 diff（HEAD==gatedHead==313d378）+ 未跟踪新文件（backend/macos.rs、backend/winfsp.rs、tests/e2e.rs、src/bin/e2e-helper.rs、build.rs）",
+    "决策链：D-001~D-004 已在主会话写入（macOS union / WinFsp junction 编排 / E2E Rust 重写 / GPL-3.0 许可），与产物一致，无需重复提取",
+    "独立验证已跑：cargo test --workspace 全绿（8 cli + 15 core，7 e2e ignored）；clippy -D warnings 0；x86_64-apple-darwin 交叉检查 0 错误；x86_64-unknown-linux-gnu 交叉检查 0 错误；Cargo.lock 含 winfsp/junction/winfsp-sys",
+    "winfsp.rs 深读：open/create/read/write/cleanup/rename/read_directory/overwrite/set_file_size 均实现且逻辑正确；copy-up 判定、rename 跨层 whiteout 落位、unmount 的 view 判定（拒绝非 cowt junction）、SD 构建（PSECURITY_DESCRIPTOR/PSID newtype 包装）均正确",
+    "macos.rs 深读：mount -t union -o nobrowse <upper> <mountpoint>（NetBSD mount(8) 语义，macOS 实证待 CI）；is_mounted 用 ' on <path> ' 匹配正确；probe 一次性探测",
+    "e2e.rs/ci.yml/e2e-helper.rs/build.rs/cli.rs/state.rs/drop.rs/merge.rs/overlay.rs/fork.rs 均深读：机制闭环（run.pid 轮询→挂载就绪→视图写入→自然退出/崩溃→diff/apply/drop 断言），CI 三平台矩阵 + choco/sudo + libclang-dev 齐备",
+    "【BLOCKER】crates/cowt/src/commands/run.rs is_mounted 分支：stale-mount 自动卸载无鉴别——① Linux/macOS 上 unmount 任意挂载点（用户手动/其他工具挂载会被误卸载，旧语义是拒绝）；② mount→write_pidfile 间隙存在并发竞态（并发 cowt run 刚挂载未写 pid 时被误卸载）。修复建议：仅当 run.pid 文件存在且 pid 不存活（明确 stale）才自动清理，否则 bail",
+    "【次要点】winfsp.rs mount() 在 junction::create 或 host.mount 失败时无回滚（junction 创建失败 → P 空目录 + real 残留，stale 恢复只认 junction）——低概率错误路径",
+    "【次要点】README 'brew install cowt' 不实（cowt 未发布到 Homebrew）",
+    "【次要点】winfsp.rs delete_merged 中 `let _ = upper_had;` 无用残留；read_directory 不返回 '.'/'..'（WinFsp 驱动是否合成未验证，待 CI）；Windows e2e perf 120s 预算在慢 CI 可能不足",
+    "发散核实：macOS union 语法与 . / .. 问题均属待 CI 验证风险（doctor 探测失败会优雅报告不可用）；历史 7 提交（313d378 及更早）为先前会话产物，与本 run 无关，message 与 README/链一致"
+  ],
+  "lastAuditDurationMs": 0,
+  "auditStartedAt": 1786752752808,
+  "auditRunId": "",
+  "lastError": null,
+  "gatedHead": "313d3786abaf16b5b5a1f9f8c45fa74a7739301b",
+  "injectedSignatureAt": 1786753073255,
+  "injectedInterimAt": null
+}

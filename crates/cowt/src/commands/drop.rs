@@ -54,7 +54,9 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
     }
 
     // 3. Atomic-ish removal: rename aside first so the worktree id vanishes
-    // immediately, then delete the data directory.
+    // immediately, then delete the data directory. On Windows the killed
+    // `cowt run` may still be tearing down its WinFsp mount (inside the state
+    // dir), so retry the deletion briefly.
     let trash = state.root().join(format!(
         ".trash-{}-{}",
         meta.id,
@@ -64,7 +66,22 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
             .unwrap_or(0)
     ));
     fs::rename(&dir, &trash).with_context(|| format!("rename {} aside", dir.display()))?;
-    fs::remove_dir_all(&trash).with_context(|| format!("delete {}", trash.display()))?;
+    let mut last_err = None;
+    for _ in 0..30 {
+        match fs::remove_dir_all(&trash) {
+            Ok(()) => {
+                last_err = None;
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            }
+        }
+    }
+    if let Some(e) = last_err {
+        return Err(anyhow::anyhow!(e)).with_context(|| format!("delete {}", trash.display()));
+    }
 
     println!(
         "dropped worktree {} ({}): isolated data deleted, host directory untouched",
@@ -76,11 +93,13 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
 
 #[cfg(unix)]
 fn terminate(pid: u32) {
+    use crate::state::pid_alive;
     use std::process::Command;
     let _ = Command::new("kill").arg(pid.to_string()).status();
-    // Wait briefly for SIGTERM to land, then escalate.
+    // Wait briefly for SIGTERM to land, then escalate. `kill -0` probes
+    // liveness on macOS too, where /proc does not exist.
     for _ in 0..20 {
-        if !std::path::Path::new(&format!("/proc/{pid}")).exists() {
+        if !pid_alive(pid) {
             return;
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
@@ -88,5 +107,10 @@ fn terminate(pid: u32) {
     let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
 }
 
-#[cfg(not(unix))]
-fn terminate(_pid: u32) {}
+#[cfg(windows)]
+fn terminate(pid: u32) {
+    use std::process::Command;
+    let _ = Command::new("taskkill")
+        .args(["/F", "/PID", &pid.to_string()])
+        .status();
+}

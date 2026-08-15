@@ -32,32 +32,60 @@ jobs:
       - run: cargo clippy --workspace --all-targets -- -D warnings
 
   test:
-    name: unit + integration
-    runs-on: ubuntu-latest
+    name: unit + integration (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install fuse-overlayfs (enables FUSE-backed integration tests)
+      - name: "Install fuse-overlayfs (Linux: FUSE-backed integration tests)"
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs
+      - name: "Install WinFsp (Windows: FUSE-backed integration tests)"
+        if: runner.os == 'Windows'
+        run: choco install winfsp -y
       - run: cargo test --workspace -- --nocapture
 
   e2e:
-    name: E2E acceptance (kernel-overlay)
-    runs-on: ubuntu-latest
+    name: "E2E (${{ matrix.os }}${{ matrix.sudo && ' as root' || '' }})"
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Root => kernel overlayfs backend (native performance).
+          - os: ubuntu-latest
+            sudo: true
+          # Root => macOS kernel union mount (`mount -t union`; no kexts,
+          # which is what makes macFUSE unusable on CI runners).
+          - os: macos-latest
+            sudo: true
+          # Admin runner => WinFsp kernel driver via choco.
+          - os: windows-latest
+            sudo: false
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
-      - name: Install fuse-overlayfs
+      - name: Install fuse-overlayfs (Linux)
+        if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs
-      - name: Build release binary
-        run: cargo build --release
+      - name: Install WinFsp (Windows)
+        if: runner.os == 'Windows'
+        run: choco install winfsp -y
       - name: Run E2E acceptance suite
-        # sudo => kernel-overlay backend (direct mount, native performance).
-        # The unprivileged fuse-overlayfs path is covered by cargo tests above
-        # and by the kernel-userns auto-detection on hosts that allow it.
-        run: sudo -E bash scripts/e2e.sh ./target/release/cowt
+        shell: bash
+        run: |
+          if [ "${{ matrix.sudo }}" = "true" ]; then
+            # sudo -E keeps RUSTUP_HOME/CARGO_HOME so no toolchain re-download.
+            sudo -E bash -c 'cargo test --test e2e -- --ignored --nocapture'
+          else
+            cargo test --test e2e -- --ignored --nocapture
+          fi
 
   cross-platform-check:
     name: cross-compile check (${{ matrix.target }})
@@ -74,12 +102,19 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      - run: cargo check --workspace --target ${{ matrix.target }}
+      # winfsp-sys regenerates its bindings with bindgen at build time.
+      - name: Install libclang (bindgen)
+        run: sudo apt-get update && sudo apt-get install -y libclang-dev
+      - run: cargo check --workspace --all-targets --target ${{ matrix.target }}
 
   release-binary:
-    name: release build + artifact
-    runs-on: ubuntu-latest
+    name: release build (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
     needs: [fmt, clippy, test, e2e]
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
@@ -89,5 +124,5 @@ jobs:
         run: ./target/release/cowt --version && ./target/release/cowt doctor || true
       - uses: actions/upload-artifact@v4
         with:
-          name: cowt-linux-x86_64
-          path: target/release/cowt
+          name: cowt-${{ matrix.os }}
+          path: target/release/cowt${{ runner.os == 'Windows' && '.exe' || '' }}

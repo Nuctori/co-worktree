@@ -248,7 +248,12 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
             }
             fs::copy(source, &staged_file).map_err(|e| Error::io(source.clone(), e))?;
             // fsync the staged body so a crash mid-rename never yields zeros.
-            let f = fs::File::open(&staged_file).map_err(|e| Error::io(staged_file.clone(), e))?;
+            // Write access is required: FlushFileBuffers on Windows rejects a
+            // read-only handle with ERROR_ACCESS_DENIED.
+            let f = fs::OpenOptions::new()
+                .write(true)
+                .open(&staged_file)
+                .map_err(|e| Error::io(staged_file.clone(), e))?;
             f.sync_all()
                 .map_err(|e| Error::io(staged_file.clone(), e))?;
             staged.push((staged_file, dest));
@@ -268,7 +273,7 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
         if let Some(p) = dest.parent() {
             fs::create_dir_all(p).map_err(|e| Error::io(p.to_path_buf(), e))?;
         }
-        fs::rename(staged_file, dest).map_err(|e| Error::io(dest.clone(), e))?;
+        commit_rename(staged_file, dest)?;
         report.written += 1;
     }
     for op in &plan.operations {
@@ -338,4 +343,19 @@ fn write_symlink(_target: &Path, dest: &Path) -> Result<()> {
             "symlink application is only supported on unix",
         ),
     ))
+}
+
+/// Move the staged body into place. On unix `rename(2)` atomically replaces
+/// the destination; Windows `MoveFile` refuses to overwrite, so the old file
+/// is removed first — the commit is no longer atomic there, but the staging
+/// phase still guarantees zero pollution on any pre-commit failure.
+#[cfg(unix)]
+fn commit_rename(staged: &Path, dest: &Path) -> Result<()> {
+    fs::rename(staged, dest).map_err(|e| Error::io(dest.to_path_buf(), e))
+}
+
+#[cfg(not(unix))]
+fn commit_rename(staged: &Path, dest: &Path) -> Result<()> {
+    let _ = fs::remove_file(dest); // replace: Windows rename fails if dest exists
+    fs::rename(staged, dest).map_err(|e| Error::io(dest.to_path_buf(), e))
 }
