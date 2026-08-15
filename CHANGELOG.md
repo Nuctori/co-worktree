@@ -45,10 +45,17 @@ All notable changes to co-worktree are documented here.
 
 ### Known limitations
 
-- macOS: Apple's file APIs (Finder etc.) handle union mounts poorly; POSIX
-  programs work normally.
+- macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX
+  programs work normally. FUSE-T's NFS mount does not come up on headless
+  GitHub Actions runners (fuse_mount returns but the mount never appears in
+  `mount(8)`); the CI E2E runs the core suite there and skips mount tests
+  with an explicit note — verify mounting on a real Mac.
 - Windows: userspace I/O write overhead (E2E budget 3× native vs 1.2× on
   kernel backends); state dir and target must be on the same volume; no
   symlink semantics; registry is not isolated.
 - The Windows binary links GPL-3.0 `winfsp` bindings (WinFsp itself is GPLv3
-  with a FLOSS exception; see README License section).
+  with a FLOSS exception; see README License section). The macOS binary
+  links FUSE-T's libfuse-t.dylib (must be installed).
+- `winfsp-sys` is vendored under `third_party/` with pre-generated bindings
+  (bindgen cross-compiling to Windows on Linux hosts is unworkable); update
+  it manually when bumping the WinFsp API version.
