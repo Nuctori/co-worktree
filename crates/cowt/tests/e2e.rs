@@ -1343,13 +1343,28 @@ fn e2e_case_recreate() {
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
+    // The kernel-style whiteout is a char dev carrying the victim's own name
+    // — it is not a ghost entry. Only real file entries count.
+    let cache_entries = fs::read_dir(env.upper_of(&id))
+        .unwrap()
+        .flatten()
+        .filter(|e| {
+            e.file_name().to_string_lossy().to_lowercase() == "cache.bin" && {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::FileTypeExt;
+                    !e.file_type().map(|t| t.is_char_device()).unwrap_or(false)
+                }
+                #[cfg(windows)]
+                {
+                    true
+                }
+            }
+        })
+        .count();
     assert_eq!(
-        upper_files
-            .iter()
-            .filter(|n| n.to_lowercase() == "cache.bin")
-            .count(),
-        1,
-        "no ghost entries in upper after apply: {upper_files:?}"
+        cache_entries, 1,
+        "exactly one real cache.bin entry in upper after apply: {upper_files:?}"
     );
     env.cowt_ok(&["drop", &id]);
 }
