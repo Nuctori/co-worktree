@@ -346,6 +346,10 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
                     .map_err(|e| Error::io(staged_file.clone(), e))?;
                 if p.readonly() {
                     let mut w = p.clone();
+                    // Deliberate: temporary write access for the fsync only;
+                    // the original permissions are restored right below and
+                    // the final file keeps them (round-24).
+                    #[allow(clippy::permissions_set_readonly_false)]
                     w.set_readonly(false);
                     fs::set_permissions(&staged_file, w)
                         .map_err(|e| Error::io(staged_file.clone(), e))?;
