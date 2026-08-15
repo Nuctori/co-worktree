@@ -245,7 +245,7 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
             // ERROR_ACCESS_DENIED: the process exists but is protected —
             // treat as alive. ERROR_INVALID_PARAMETER: no such pid.
             e.code() != ERROR_INVALID_PARAMETER.into()
-                && e.code() != windows::core::HRESULT(ERROR_ACCESS_DENIED.0 as i32)
+                && e.code() != windows::core::HRESULT::from_win32(ERROR_ACCESS_DENIED.0)
         }
     }
 }

@@ -1,129 +1,156 @@
 # co-worktree
 
-**Git-worktree 式的隔离、审查、合并能力——给任意应用程序的配置与数据目录。**
+**Git-worktree-style isolation, review and merge for any application's config and data directory.**
 
-在主环境运行程序时，其所有文件/配置副作用被透明重定向到隔离层；你可以审查变更、
-选择性合并回主环境，或一键丢弃。**不是容器，不是 VM，不是安全沙箱。**
+Run a program in its normal environment while every file/config side effect is
+transparently redirected into an isolated layer; review the changes, merge them
+back selectively, or discard them with one command. **Not a container, not a
+VM, not a security sandbox.**
 
-## 安装
+![CI](https://github.com/Nuctori/co-worktree/actions/workflows/ci.yml/badge.svg)
+
+> 中文版文档见 [README.zh-CN 中文](README.zh-CN.md).
+
+## Features
+
+- **Isolation without copies**: `fork` takes a metadata snapshot (paths +
+  BLAKE3 hashes) — no files are copied. `run` mounts a copy-on-write view over
+  the original path; the program reads through to the host and writes only
+  into the isolated layer.
+- **Reviewable changes**: `diff` reports file-level, Myers line-level, and
+  JSON/YAML key-level changes against the fork snapshot.
+- **Safe merge-back**: `apply` performs a three-way merge (base ⊗ current ⊗
+  worktree) and writes nothing on conflict. `drop` unmounts and deletes the
+  layer, leaving zero residue on the host.
+- **Cross-platform**: Linux (kernel overlayfs, root or userns), macOS (FUSE-T,
+  kext-less, no root), Windows (WinFsp, no admin) — one binary, backend
+  auto-detected at runtime, shared whiteout encoding on all three.
+- **Crash recovery**: a hard-killed `cowt run` (kill -9, power loss) is
+  recognized by the next `run` / `diff` / `apply` / `drop --force` via the
+  stale pidfile — and only when the mount is provably our own leftover;
+  foreign mounts are never unmounted.
+- **Zero daemons, zero network, fully offline.**
+
+## Install
 
 ```sh
-# Linux: 唯一的运行时依赖是 fuse-overlayfs（用户态，无需内核模块）
+# Linux: only runtime dependency is fuse-overlayfs (userspace, no kernel module)
 sudo apt-get install fuse-overlayfs   # Debian/Ubuntu
 sudo dnf install fuse-overlayfs       # Fedora
 
-cargo install --path crates/cowt --bin cowt   # 或从 Releases 下载单二进制
+cargo install --path crates/cowt --bin cowt   # or grab a binary from Releases
 ```
 
-macOS 与 Windows：
+macOS and Windows:
 
 ```sh
-# macOS: FUSE-T（kext-less FUSE，经 NFS 实现）——无内核扩展、无批准弹窗、无需 root
-cargo install --path crates/cowt --bin cowt   # 或从 Releases 下载
-bash scripts/macos/install-fuse-t.sh          # 一次性安装 FUSE-T + 链接 libfuse
+# macOS: FUSE-T (kext-less FUSE via NFS) — no kernel extension, no root
+cargo install --path crates/cowt --bin cowt
+bash scripts/macos/install-fuse-t.sh          # one-time: install FUSE-T + link libfuse
 cowt run vscode -- code
 
-# Windows: 需要 WinFsp（签名内核驱动 + 用户态 DLL）
-choco install winfsp                  # 或从 https://winfsp.dev 安装
-cowt run vscode -- code              # 无需管理员
+# Windows: WinFsp (signed kernel driver + userspace DLL)
+winget install --id WinFsp.WinFsp   # or: choco install winfsp / winfsp.dev
+cowt run vscode -- code             # no admin needed
 ```
 
-`cowt doctor` 在任何平台上报告后端可用性。
+`cowt doctor` reports backend availability on any platform.
 
-## 快速上手
+## Quick start
 
 ```sh
-# 1. Fork：为 VS Code 的配置目录创建隔离工作树（仅元数据快照，不复制文件）
+# 1. Fork: isolate VS Code's config directory (metadata snapshot only)
 cowt fork ~/.config/Code --name vscode
 
-# 2. Run：在虚拟合并视图中运行程序，写操作全部落入隔离层
+# 2. Run: VS Code sees its normal path, writes land in the isolated layer
 cowt run vscode -- code
 
-# 3. Diff：审查隔离层相对 fork 快照的变更（文件级 / 行级 / JSON-YAML 键级）
-cowt diff vscode
-cowt diff vscode --content        # 含 Myers 行级 diff 与键级 diff
-cowt diff vscode --json           # 机器可读
+# 3. Diff: review what the layer changed
+cowt diff vscode              # file-level
+cowt diff vscode --content    # + Myers line diff and JSON/YAML key diff
+cowt diff vscode --json       # machine-readable
 
-# 4a. Apply：三路合并（base / current / worktree）回主环境，原子提交
-cowt apply vscode --dry-run       # 预览操作与冲突
-cowt apply vscode                 # 无冲突才写入；有冲突零污染中止
+# 4a. Apply: three-way merge back; conflict-free or nothing is written
+cowt apply vscode --dry-run   # preview operations and conflicts
+cowt apply vscode
 
-# 4b. Drop：一键丢弃，宿主零残留
-cowt drop vscode                  # 进程在跑会拒绝；--force 先杀进程再清理
+# 4b. Drop: discard the layer, host untouched
+cowt drop vscode              # refuses while a process is running; --force kills first
 ```
 
-## 工作原理
+## How it works
 
 ```
-┌───────────────────── 宿主目录 ~/.config/Code ─────────────────────┐
-│  fork 时: 生成 base manifest（路径 + BLAKE3 哈希，纯元数据）        │
-│  run 时:  fuse-overlayfs 挂载合并视图到原路径                        │
-│           读 → 透传 lower（宿主目录）                               │
-│           写 → 重定向到 upper（~/.local/state/cowt/<id>/upper）      │
-│  diff:   base manifest ⊗ upper → added / modified / deleted       │
-│  apply:  base ⊗ current ⊗ worktree 三路合并                        │
-│          base==current 且 worktree 变 → 应用                        │
-│          三者皆不同 → 冲突，零写入，输出结构化报告                     │
-│  drop:   卸载 + 原子删除隔离层                                      │
-└──────────────────────────────────────────────────────────────────┘
+┌───────────────── host dir ~/.config/Code ─────────────────┐
+│ fork  → base manifest (paths + BLAKE3 hashes, metadata)    │
+│ run   → merged view mounted over the original path         │
+│          reads  → pass through to lower (host dir)         │
+│          writes → redirected to upper (isolated layer)     │
+│ diff  → base manifest ⊗ upper → added / modified / deleted │
+│ apply → three-way merge base ⊗ current ⊗ worktree          │
+│          base==current and worktree changed → apply        │
+│          all three differ → conflict, zero writes          │
+│ drop  → unmount + atomic deletion of the layer             │
+└────────────────────────────────────────────────────────────┘
 ```
 
-## 架构
+Deletions become **whiteouts** in the layer (kernel-style char device 0:0
+carrying the victim's name, or zero-size `.wh.`-prefixed files), so renames,
+delete-then-recreate, and case-insensitive lookups behave identically on every
+backend.
 
-| 层 | 内容 |
-| --- | --- |
-| `cowt-core` | 纯 Rust、跨平台：Manifest（并行 BLAKE3 扫描）、Diff（Myers 行级 / JSON·YAML 键级）、三路 Merge（暂存区 + rename 原子提交） |
-| `cowt` CLI | 平台后端 Trait：Linux overlayfs 三种模式、macOS 内核 union mount、Windows WinFsp 用户态文件系统（见下） |
+## Platform support
 
-### 平台后端
-
-| 平台 | 后端 | 要求 | 特点 |
+| Platform | Backend | Requirements | Verified |
 | --- | --- | --- | --- |
-| Linux | kernel overlayfs（root）/ kernel overlayfs+userns（非 root）/ fuse-overlayfs（兜底） | fuse-overlayfs 包 | 运行时自动探测；删除落为 whiteout（char dev 0:0 原名 / `.wh.` 前缀零大小文件两种编码均支持解析） |
-| macOS | FUSE-T 用户态 CoW 文件系统（`fuser` 绑定，经 NFS 实现，kext-less、无特权） | 安装 FUSE-T（`scripts/macos/install-fuse-t.sh`） | 无需 root；无内核扩展（macFUSE kext 无法在 CI 无人值守批准；Apple 移除了内核 union mount）；运行期宿主目录移到 `state/<id>/real`，原路径变 symlink → 挂载视图；删除落为 `.wh.` whiteout。注意：FUSE-T 的 NFS 挂载在无头 CI runner 上不可用（fuse_mount 返回但挂载不生效），核心测试仍跑、挂载用例自动跳过 |
-| Windows | WinFsp 用户态 CoW 文件系统（`winfsp` 绑定） | 安装 WinFsp（choco / 官网） | 运行期宿主目录移到 `state/<id>/real`，WinFsp 直接挂载到原路径；删除落为 `.wh.` whiteout（大小写规范化处理）；用户态 I/O 写路径开销高于内核后端 |
+| **Linux** | kernel overlayfs (root) / overlayfs+userns (non-root) / fuse-overlayfs (fallback) | fuse-overlayfs package | ✅ full E2E in CI + real machine |
+| **Windows** | WinFsp userspace CoW filesystem (`winfsp` bindings) | WinFsp (winget / choco / winfsp.dev) | ✅ full E2E in CI + real machine |
+| **macOS** | FUSE-T userspace CoW filesystem (`fuser` bindings, NFS-based, kext-less, no root) | FUSE-T (`scripts/macos/install-fuse-t.sh`) | ✅ core-logic E2E in CI — mount cases auto-skip on headless runners (FUSE-T NFS mounts do not activate there; environment limit, not a code issue). Mount path awaits a real-machine run |
 
-运行时探测，无需配置；`cowt doctor` 显示当前后端。三种后端共用同一套 whiteout 编码，
-diff / merge / apply 逻辑完全一致。
+While running, the macOS/Windows backends move the host directory to
+`state/<id>/real` and mount the view over the original path (symlink on macOS,
+WinFsp direct mount on Windows).
 
-设计决策：同步 I/O 无 async runtime（FUSE 回调模型是同步的）；零网络服务、零容器运行时，
-完全离线可用；MVP 不隔离 Windows 注册表（现代应用配置已文件化）；macOS/Windows 后端不处理
-符号链接语义。
+CI baseline: **12/12 green** — rustfmt, clippy `-D warnings`, unit +
+integration tests on all three platforms, real-backend E2E on all three,
+Windows cross-compile check, release builds for all three.
 
-## 边界声明
+## Safety boundaries
 
-- **不隔离运行时**：不限制 CPU、内存、网络、进程间通信
-- **不防恶意软件**：只防"副作用污染"，不防提权/内核漏洞/驱动注入
-- **只隔离用户级目录**：默认拒绝 `$HOME` 之外的路径（`--force-path` 可覆盖）
-- **Windows 注册表**：MVP 不隔离，仅文件级配置
-- **崩溃恢复**：`cowt run` 被强杀（kill -9 / 断电）后，残留的挂载与 pidfile 由下一次
-  `cowt run` / `cowt diff` / `cowt apply` / `cowt drop --force` 自动识别并恢复——仅当
-  该 worktree 自己的 pidfile 已失效时才清理，外来挂载一律拒绝叠加
-- **Windows 同卷限制**：状态目录（`COWT_HOME`，默认 `%LOCALAPPDATA%\cowt`）必须与目标
-  应用目录在同一卷（Windows 不能跨卷 rename）；跨卷时 `cowt run` 给出明确报错
+- **Not a sandbox**: no CPU, memory, network, or IPC limits; not malware
+  protection — side-effect isolation only
+- **User-level directories only**: paths outside `$HOME` are refused by
+  default (`--force-path` overrides)
+- **Windows registry**: not isolated (MVP: file-level config only)
+- **Windows same-volume limit**: the state dir (`COWT_HOME`, default
+  `%LOCALAPPDATA%\cowt`) must be on the same volume as the target (Windows
+  cannot rename across volumes); `cowt run` reports a clear error otherwise
 
-## 性能（验收标准 + 实测）
+## Performance
 
-| 指标 | 标准 | 实测 |
+| Metric | Budget | Measured |
 | --- | --- | --- |
-| 空 worktree fork | < 500ms | ~5ms |
-| manifest 扫描 | 支持 10k+ 文件 | 10k 文件 ~215ms |
-| 顺序读写开销 | < 20% | kernel-overlay ~9%（CI 实测）；fuse-overlayfs 在普通 SSD 上 ~4–7% |
-| 10k 文件 diff | < 3s | ~20–200ms |
+| empty worktree fork | < 500ms | ~5ms |
+| 10k-file manifest scan | 10k+ files | ~215ms |
+| sequential write overhead | < 20% | kernel-overlay ~9% (CI); fuse-overlayfs ~4–7% |
+| 10k-file diff | < 3s | ~20–200ms |
 
-## 开发与验证
+## Development
 
 ```sh
-cargo test --workspace                # 单元测试 + CLI 集成测试（后端可用时含真实挂载）
-cargo test --test e2e -- --ignored --test-threads=1   # 端到端验收（root / WinFsp）
+cargo test --workspace                                  # unit + CLI integration tests
+cargo test --test e2e -- --ignored --test-threads=1     # real-backend E2E (mount cases auto-skip on headless environments)
+cargo clippy --workspace --all-targets -- -D warnings
 ```
 
-CI（GitHub Actions）：rustfmt、clippy `-D warnings`、三平台全量测试、三平台真实后端
-E2E（Linux kernel-overlay / macOS FUSE-T / Windows WinFsp）、Windows 交叉编译检查、
-三平台 release 构建产物上传。
+Structure: `cowt-core` (pure, cross-platform manifest/diff/merge) + `cowt`
+(CLI + platform backends). The full test matrix runs on GitHub Actions on
+every push.
 
 ## License
 
-MIT；Windows 后端通过 GPL-3.0 的 `winfsp`/`winfsp-sys` 绑定链接 WinFsp。WinFsp 本体为
-GPLv3 + FLOSS 例外（允许 FLOSS 项目链接其 DLL），本项目的 MIT 许可不受影响；绑定层代码
-随 Windows 二进制以 GPL-3.0 分发。
+MIT. The Windows backend links WinFsp through the GPL-3.0
+`winfsp`/`winfsp-sys` bindings. WinFsp itself is GPLv3 with a FLOSS exception
+(explicitly permitting FLOSS projects to link its DLL), so this project's MIT
+license is unaffected; the binding layer ships with the Windows binary under
+GPL-3.0.

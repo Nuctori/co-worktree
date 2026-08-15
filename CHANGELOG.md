@@ -6,24 +6,24 @@ All notable changes to co-worktree are documented here.
 
 ### Added — cross-platform support
 
-- **macOS backend**: kernel union mount (`mount -t union`, BSD-style). No
-  third-party driver (macFUSE kexts cannot be approved headlessly on CI
-  runners). Requires root; `cowt doctor` probes availability with a real
-  mount. Deletions land as `.wh.` whiteouts, same encoding as Linux.
-- **Windows backend**: WinFsp userspace filesystem with copy-on-write. While
-  a worktree runs, the host directory is moved to `state/<id>/real` and the
-  original path becomes a junction to the WinFsp view (`state/<id>/view`);
-  junctions need no privileges. Copy-up on write-open, `.wh.` whiteouts on
-  deletion, cross-layer rename. Stale junctions from hard-killed runs are
-  auto-recovered by the next `run` / `diff` / `apply` / `drop --force`.
+- **macOS backend**: FUSE-T userspace CoW filesystem (`fuser` bindings, NFS-
+  based, kext-less, no root). The host directory is moved to `state/<id>/real`
+  while running and the original path becomes a symlink to the mounted view.
+  Deletions land as `.wh.` whiteouts, same encoding as Linux/Windows.
+- **Windows backend**: WinFsp userspace CoW filesystem. While a worktree
+  runs, the host directory is moved to `state/<id>/real` and WinFsp mounts
+  directly onto the original path; no admin needed. Copy-up on write-open,
+  `.wh.` whiteouts on deletion, cross-layer rename, case-insensitive
+  whiteout matching. Stale mounts from hard-killed runs are auto-recovered
+  by the next `run` / `diff` / `apply` / `drop --force`.
 - **GitHub Actions E2E on all three platforms**: real-backend acceptance
   suite (`crates/cowt/tests/e2e.rs`, run as root on Linux/macOS, with WinFsp
   on Windows) covering fork/run/diff/apply/drop, three-way conflicts, crash
   survival, performance budgets, concurrent-run refusal, foreign-mount
   refusal and crash-recovery-on-next-run. `scripts/e2e.sh` was replaced by
   the portable Rust suite.
-- **English documentation**: `README.en.md` (Chinese original remains
-  `README.md`).
+- **Docs (English-first)**: `README.md` (English) is now the primary
+  document; the Chinese version moved to `README.zh-CN.md`.
 
 ### Changed
 
@@ -42,9 +42,16 @@ All notable changes to co-worktree are documented here.
   denied); the staged-file fsync now opens with write access.
 - Windows: `\\?\` canonical path prefix broke the `$HOME` boundary check.
 - Windows: `.wh.` whiteout detection (zero-size files, no char devices).
-
-### Known limitations
-
+- macOS/Windows backends: unified whiteout semantics — resolve now checks
+  upper → whiteout → lower (an upper entry wins over its own whiteout),
+  merged listings hide whiteout victims, `create`/`mkdir` clear stale
+  whiteouts (delete-then-recreate round-trip, covered by a new E2E test).
+- `flush` no longer calls `sync_all()` on read-only WinFsp handles
+  (FlushFileBuffers denies on read-only handles).
+- Windows `pid_alive` distinguishes `ERROR_ACCESS_DENIED` (protected
+  process, alive) from `ERROR_INVALID_PARAMETER` (no such pid).
+- `cowt drop --force` only unmounts mounts proven to be our own stale
+  leftovers; foreign mounts are refused even with `--force`.
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX
   programs work normally. FUSE-T's NFS mount does not come up on headless
   GitHub Actions runners (fuse_mount returns but the mount never appears in
