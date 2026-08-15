@@ -1330,13 +1330,17 @@ fn e2e_case_recreate() {
     }
     #[cfg(unix)]
     {
-        // Case-sensitive: only the new spelling exists on the host.
-        assert_eq!(
-            fs::read_to_string(app.join("CACHE.BIN")).unwrap(),
-            "reborn-case\n",
-            "apply must update the host file"
-        );
-        assert!(!app.join("cache.bin").exists());
+        // Case-sensitive filesystems (Linux, opt-in macOS APFS): only the
+        // new spelling exists. On default case-insensitive macOS APFS either
+        // spelling resolves — read whichever exists.
+        match fs::read_to_string(app.join("CACHE.BIN")) {
+            Ok(s) => assert_eq!(s, "reborn-case\n", "apply must update the host file"),
+            Err(_) => assert_eq!(
+                fs::read_to_string(app.join("cache.bin")).unwrap(),
+                "reborn-case\n",
+                "apply must update the host file (case-insensitive volume)"
+            ),
+        }
     }
     let upper_files: Vec<String> = fs::read_dir(env.upper_of(&id))
         .unwrap()

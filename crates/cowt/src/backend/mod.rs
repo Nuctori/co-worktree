@@ -195,11 +195,68 @@ pub(crate) fn reap_orphan_child(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
-/// Process start time in a comparable form: unix = starttime field of
-/// /proc/<pid>/stat (clock ticks since boot); Windows = creation FILETIME
-/// (100ns since 1601). `None` when unavailable.
+/// Process start time in a comparable form: Linux = starttime field of
+/// /proc/<pid>/stat (clock ticks since boot); macOS = proc_pidinfo start
+/// time (µs since boot); Windows = creation FILETIME (100ns since 1601).
+/// `None` when unavailable. Only used to distinguish a recycled pid, so the
+/// exact unit is irrelevant as long as it is stable per process.
 pub(crate) fn process_starttime(pid: u32) -> Option<u128> {
-    #[cfg(unix)]
+    #[cfg(target_os = "macos")]
+    {
+        // libproc's proc_pidinfo(PROC_PIDTBSDINFO) — no crate needed.
+        #[repr(C)]
+        struct ProcBsdInfo {
+            pbi_flags: u32,
+            pbi_status: u32,
+            pbi_xstatus: u32,
+            pbi_pid: u32,
+            pbi_ppid: u32,
+            pbi_uid: u32,
+            pbi_gid: u32,
+            pbi_ruid: u32,
+            pbi_rgid: u32,
+            pbi_svuid: u32,
+            pbi_svgid: u32,
+            rfu_1: u32,
+            pbi_comm: [u8; 64],
+            pbi_name: [u8; 64],
+            pbi_nfiles: u32,
+            pbi_pgid: u32,
+            pbi_pjobc: u32,
+            e_tdev: u32,
+            e_tpgid: u32,
+            pbi_nice: i32,
+            pbi_start_tvsec: u64,
+            pbi_start_tvusec: u64,
+        }
+        extern "C" {
+            fn proc_pidinfo(
+                pid: i32,
+                flavor: i32,
+                arg: u64,
+                buffer: *mut std::ffi::c_void,
+                buffersize: i32,
+            ) -> i32;
+        }
+        const PROC_PIDTBSDINFO: i32 = 3;
+        let mut info = std::mem::MaybeUninit::<ProcBsdInfo>::zeroed();
+        let n = unsafe {
+            proc_pidinfo(
+                pid as i32,
+                PROC_PIDTBSDINFO,
+                0,
+                info.as_mut_ptr() as *mut std::ffi::c_void,
+                std::mem::size_of::<ProcBsdInfo>() as i32,
+            )
+        };
+        if n == std::mem::size_of::<ProcBsdInfo>() as i32 {
+            let info = unsafe { info.assume_init() };
+            Some((info.pbi_start_tvsec as u128) * 1_000_000 + info.pbi_start_tvusec as u128)
+        } else {
+            None
+        }
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let after_comm = stat.rfind(')')?;

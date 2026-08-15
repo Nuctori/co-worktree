@@ -153,6 +153,17 @@ Windows cross-compile check, release builds for all three.
 - **Windows: apply to a read-only host file fails** with a generic error
   (delete-then-rename cannot replace a READONLY-attribute file; clear the
   attribute first). Unix `rename(2)` replaces it atomically.
+- **Linux userns mode**: a whole-directory rename through the view is not
+  materialized into upper before teardown (the mount lives in a private
+  namespace) — diff/apply then see the renamed dir without its children.
+  Root/fuse modes materialize it; run as root or use `--force-path`-free
+  setups where kernel-direct is available.
+- **macOS case-sensitive APFS**: whiteout shadowing matches
+  case-insensitively (safe default for the common case-insensitive APFS),
+  so deleting `Foo.txt` on a case-sensitive volume also hides a distinct
+  lower `foo.txt`.
+- **JSON paths use native separators** (`\` on Windows, `/` elsewhere);
+  scripts parsing `diff --json` / `apply --dry-run --json` should normalize.
 
 ## Performance
 
