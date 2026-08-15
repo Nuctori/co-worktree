@@ -200,6 +200,36 @@ pub(crate) fn reap_orphan_child(child: &mut std::process::Child) {
     let _ = child.wait();
 }
 
+/// proc_shortbsdinfo from macOS libproc.h — mirrored exactly so
+/// `pbsi_start_tvsec` lands on the real offset (88). Layout is pinned by a
+/// size assertion in tests (a wrong layout silently returns None from
+/// proc_pidinfo and disables the recycled-pid guard).
+#[cfg(target_os = "macos")]
+#[repr(C)]
+pub(crate) struct ProcShortBsdInfo {
+    pub(crate) pbsi_flags: u32,
+    pub(crate) pbsi_status: u32,
+    pub(crate) pbsi_xstatus: u32,
+    pub(crate) pbsi_pid: u32,
+    pub(crate) pbsi_ppid: u32,
+    pub(crate) pbsi_uid: u32,
+    pub(crate) pbsi_gid: u32,
+    pub(crate) pbsi_ruid: u32,
+    pub(crate) pbsi_rgid: u32,
+    pub(crate) pbsi_svuid: u32,
+    pub(crate) pbsi_svgid: u32,
+    pub(crate) rfu_1: u32,
+    pub(crate) pbsi_comm: [u8; 16], // MAXCOMLEN
+    pub(crate) pbsi_nfiles: u32,
+    pub(crate) pbsi_pgid: u32,
+    pub(crate) pbsi_pjobc: u32,
+    pub(crate) e_tdev: u32,
+    pub(crate) e_tpgid: u32,
+    pub(crate) pbsi_nice: i32,
+    pub(crate) pbsi_start_tvsec: u64,
+    pub(crate) pbsi_start_tvusec: u64,
+}
+
 /// Process start time in a comparable form: Linux = starttime field of
 /// /proc/<pid>/stat (clock ticks since boot); macOS = proc_pidinfo start
 /// time (µs since boot); Windows = creation FILETIME (100ns since 1601).
@@ -208,32 +238,9 @@ pub(crate) fn reap_orphan_child(child: &mut std::process::Child) {
 pub(crate) fn process_starttime(pid: u32) -> Option<u128> {
     #[cfg(target_os = "macos")]
     {
-        // libproc's proc_pidinfo(PROC_PIDTBSDINFO) — no crate needed.
-        #[repr(C)]
-        struct ProcBsdInfo {
-            pbi_flags: u32,
-            pbi_status: u32,
-            pbi_xstatus: u32,
-            pbi_pid: u32,
-            pbi_ppid: u32,
-            pbi_uid: u32,
-            pbi_gid: u32,
-            pbi_ruid: u32,
-            pbi_rgid: u32,
-            pbi_svuid: u32,
-            pbi_svgid: u32,
-            rfu_1: u32,
-            pbi_comm: [u8; 64],
-            pbi_name: [u8; 64],
-            pbi_nfiles: u32,
-            pbi_pgid: u32,
-            pbi_pjobc: u32,
-            e_tdev: u32,
-            e_tpgid: u32,
-            pbi_nice: i32,
-            pbi_start_tvsec: u64,
-            pbi_start_tvusec: u64,
-        }
+        // libproc's proc_pidinfo(PROC_PIDT_SHORTBSDINFO) — no crate needed.
+        // proc_shortbsdinfo (libproc.h): 12×u32 header + MAXCOMLEN(16) comm
+        // + 5×u32 + nice + start times; start_tvsec sits at offset 88.
         extern "C" {
             fn proc_pidinfo(
                 pid: i32,
@@ -243,24 +250,25 @@ pub(crate) fn process_starttime(pid: u32) -> Option<u128> {
                 buffersize: i32,
             ) -> i32;
         }
-        const PROC_PIDTBSDINFO: i32 = 3;
-        let mut info = std::mem::MaybeUninit::<ProcBsdInfo>::zeroed();
+        const PROC_PIDT_SHORTBSDINFO: i32 = 4;
+        let mut info = std::mem::MaybeUninit::<ProcShortBsdInfo>::zeroed();
         let n = unsafe {
             proc_pidinfo(
                 pid as i32,
-                PROC_PIDTBSDINFO,
+                PROC_PIDT_SHORTBSDINFO,
                 0,
                 info.as_mut_ptr() as *mut std::ffi::c_void,
-                std::mem::size_of::<ProcBsdInfo>() as i32,
+                std::mem::size_of::<ProcShortBsdInfo>() as i32,
             )
         };
-        if n == std::mem::size_of::<ProcBsdInfo>() as i32 {
+        if n == std::mem::size_of::<ProcShortBsdInfo>() as i32 {
             let info = unsafe { info.assume_init() };
-            Some((info.pbi_start_tvsec as u128) * 1_000_000 + info.pbi_start_tvusec as u128)
+            Some((info.pbsi_start_tvsec as u128) * 1_000_000 + info.pbsi_start_tvusec as u128)
         } else {
             None
         }
     }
+    #[cfg(all(unix, not(target_os = "macos")))]
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
@@ -425,5 +433,23 @@ pub fn recover_stale_mount(
             "{} is already a mountpoint; refusing to stack a second overlay",
             target.display()
         )
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod macos_ffi_tests {
+    use super::ProcShortBsdInfo;
+    use std::mem::{offset_of, size_of};
+
+    #[test]
+    fn proc_shortbsdinfo_layout_matches_libproc() {
+        // proc_shortbsdinfo from macOS libproc.h:
+        // 12×u32 header (48) + char pbsi_comm[MAXCOMLEN=16] (64)
+        // + 5×u32 (84) + int32 pbsi_nice (88) + u64 start (96, aligned)
+        // + u64 usec (104). A wrong layout makes proc_pidinfo return 0 and
+        // silently disables the recycled-pid guard.
+        assert_eq!(size_of::<ProcShortBsdInfo>(), 104);
+        assert_eq!(offset_of!(ProcShortBsdInfo, pbsi_start_tvsec), 88);
+        assert_eq!(offset_of!(ProcShortBsdInfo, pbsi_start_tvusec), 96);
     }
 }
