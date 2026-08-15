@@ -5,3 +5,4 @@ Cargo.lock.bak
 # local tooling state (pi decision-auditor, subagent artifacts)
 /.pi/
 /.pi-subagents/
+/.audits/
