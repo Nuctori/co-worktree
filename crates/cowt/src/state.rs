@@ -297,7 +297,16 @@ mod tests {
         .unwrap();
         let dead_pid = child.id();
         let _ = child.wait();
-        assert!(!pid_alive(dead_pid));
+        // Process object teardown lags slightly on Windows: poll until the
+        // pid is truly gone instead of asserting on the first check.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while pid_alive(dead_pid) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "pid {dead_pid} still reported alive after exit"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
     }
 
     #[test]
