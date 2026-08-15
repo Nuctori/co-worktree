@@ -1,7 +1,7 @@
 //! Unit tests for the cowt-core engine: manifest, diff, overlay, merge.
 
 use std::fs;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use cowt_core::diff;
 use cowt_core::manifest::{EntryKind, Manifest};
@@ -566,4 +566,47 @@ fn key_diff_root_container_swap_visible() {
         }
         other => panic!("expected Keys, got {other:?}"),
     }
+}
+
+#[test]
+fn scan_detects_same_size_same_mtime_rewrite() {
+    // Round-11 regression: an external tool rewriting a file while
+    // preserving size AND mtime (touch -r / rsync -t) must still be
+    // detected by a full scan (hash differs) — the stat_eq fast path
+    // must never be used for merge decisions.
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    fs::create_dir_all(&d).unwrap();
+    let p = d.join("f.txt");
+    fs::write(&p, "aaaa\nbbbb\n").unwrap();
+    let before = fs::metadata(&p).unwrap();
+    let mtime = before.modified().unwrap();
+    let m1 = Manifest::scan(&d).unwrap().manifest;
+
+    // Same size, same mtime, different content.
+    fs::write(&p, "aaaa\ncccc\n").unwrap();
+    set_mtime(&p, mtime);
+    let m2 = Manifest::scan(&d).unwrap().manifest;
+    assert_ne!(
+        m1.entries[&PathBuf::from("f.txt")].hash,
+        m2.entries[&PathBuf::from("f.txt")].hash,
+        "full scan must re-hash: same size+mtime rewrite is a real change"
+    );
+    // And the merge planner must see a conflict (host changed).
+    let base = m1;
+    let host = m2;
+    let work_dir = tmp.path().join("w");
+    fs::create_dir_all(&work_dir).unwrap();
+    fs::write(work_dir.join("f.txt"), "WWWW\nWWWW\n").unwrap();
+    let work = Manifest::scan(&work_dir).unwrap().manifest;
+    let plan = merge::plan(&base, &host, &work, &work_dir);
+    assert!(
+        !plan.is_clean(),
+        "same-size+mtime host rewrite must conflict"
+    );
+}
+
+fn set_mtime(p: &std::path::Path, t: std::time::SystemTime) {
+    let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+    let _ = f.set_times(std::fs::FileTimes::new().set_modified(t));
 }
