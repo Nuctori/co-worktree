@@ -51,13 +51,13 @@ sudo mkdir -p /usr/local/lib/pkgconfig
 if [ ! -f /usr/local/lib/pkgconfig/fuse.pc ]; then
     sudo tee /usr/local/lib/pkgconfig/fuse.pc > /dev/null <<'EOF'
 prefix=/usr/local
-libdir=/usr/local/lib
-includedir=/usr/local/include
+libdir=${prefix}/lib
+includedir=${prefix}/include
 Name: fuse
 Description: FUSE-T (kext-less FUSE for macOS)
 Version: 2.9.9
-Libs: -L${libdir} -lfuse
-Cflags: -I${includedir}/fuse
+Libs: -L${libdir} -Wl,-rpath,${libdir} -lfuse-t
+Cflags: -I${includedir}/fuse -D_FILE_OFFSET_BITS=64
 EOF
     echo "    wrote /usr/local/lib/pkgconfig/fuse.pc"
 fi
