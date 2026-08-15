@@ -264,8 +264,31 @@ fn key_diff_by_ext(
             });
         }
     }
+    if changes.is_empty() {
+        // Root-level changes that flatten cannot express as keyed entries:
+        // an empty-container swap ({} vs []), or a root scalar change whose
+        // rendered form differs (V3/V4). Report them under the "root" key.
+        let root_old = render_scalar(&old_v);
+        let root_new = render_scalar(&new_v);
+        if root_old != root_new {
+            changes.push(KeyChange {
+                key: "root".into(),
+                kind: ChangeKind::Modified,
+                old: Some(root_old),
+                new: Some(root_new),
+            });
+        }
+    }
     changes.sort_by(|a, b| a.key.cmp(&b.key));
     Some(changes)
+}
+
+/// Escape a key segment so dotted paths stay unambiguous: a literal `.` or
+/// `[` in a key name is backslash-escaped (rendered as `a\.b`, `a\[0]`),
+/// which prevents collisions like `{"a.b":1}` vs `{"a":{"b":1}}` from
+/// silently collapsing to an empty diff.
+fn escape_key(k: &str) -> String {
+    k.replace('.', "\\.").replace('[', "\\[")
 }
 
 /// Flatten a JSON value tree into dotted key paths.
@@ -278,9 +301,9 @@ fn flatten(v: &serde_json::Value, prefix: String, out: &mut BTreeMap<String, Str
             }
             for (k, val) in map {
                 let key = if prefix.is_empty() {
-                    k.clone()
+                    escape_key(k)
                 } else {
-                    format!("{prefix}.{k}")
+                    format!("{prefix}.{}", escape_key(k))
                 };
                 flatten(val, key, out);
             }
@@ -295,14 +318,21 @@ fn flatten(v: &serde_json::Value, prefix: String, out: &mut BTreeMap<String, Str
             }
         }
         scalar => {
-            out.insert(prefix, render_scalar(scalar));
+            let key = if prefix.is_empty() {
+                "root".into()
+            } else {
+                prefix
+            };
+            out.insert(key, render_scalar(scalar));
         }
     }
 }
 
+/// Type-aware scalar rendering: strings are quoted so a type change
+/// (`123` -> `"123"`) is visible instead of rendering identically.
 fn render_scalar(v: &serde_json::Value) -> String {
     match v {
-        serde_json::Value::String(s) => s.clone(),
+        serde_json::Value::String(s) => format!("\"{s}\""),
         other => other.to_string(),
     }
 }

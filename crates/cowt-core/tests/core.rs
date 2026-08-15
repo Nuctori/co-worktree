@@ -496,3 +496,74 @@ fn merge_dir_to_file_migration() {
     assert_eq!(fs::read_to_string(host.join("x")).unwrap(), "now-a-file");
     assert!(!host.join("x").is_dir(), "old dir must be replaced by file");
 }
+
+#[test]
+fn key_diff_escapes_dotted_keys() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let work = tmp.path().join("work");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    // Literal "a.b" key vs nested {"a":{"b":...}} must NOT collide.
+    write(&base, "s.json", r#"{"a.b": 1}"#);
+    write(&work, "s.json", r#"{"a": {"b": 1}}"#);
+    let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
+    match changes[0].detail.as_ref().unwrap() {
+        diff::ContentDiff::Keys { changes: keys } => {
+            assert!(
+                !keys.is_empty(),
+                "dotted-key collision must not hide changes"
+            );
+            let escaped = keys.iter().find(|k| k.key == r"a\.b").is_some();
+            let nested = keys.iter().find(|k| k.key == "a.b").is_some();
+            assert!(
+                escaped || nested,
+                "keys: {:?}",
+                keys.iter().map(|k| &k.key).collect::<Vec<_>>()
+            );
+        }
+        other => panic!("expected Keys, got {other:?}"),
+    }
+}
+
+#[test]
+fn key_diff_type_change_visible() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let work = tmp.path().join("work");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    write(&base, "s.json", r#"{"n": 123, "b": true}"#);
+    write(&work, "s.json", r#"{"n": "123", "b": "true"}"#);
+    let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
+    match changes[0].detail.as_ref().unwrap() {
+        diff::ContentDiff::Keys { changes: keys } => {
+            assert_eq!(keys.len(), 2, "type changes must be visible: {keys:?}");
+            let n = keys.iter().find(|k| k.key == "n").unwrap();
+            assert_eq!(n.old.as_deref(), Some("123"));
+            assert_eq!(n.new.as_deref(), Some("\"123\""));
+        }
+        other => panic!("expected Keys, got {other:?}"),
+    }
+}
+
+#[test]
+fn key_diff_root_container_swap_visible() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let work = tmp.path().join("work");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    write(&base, "s.json", "{}");
+    write(&work, "s.json", "[]");
+    let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
+    match changes[0].detail.as_ref().unwrap() {
+        diff::ContentDiff::Keys { changes: keys } => {
+            assert_eq!(keys.len(), 1, "root swap must be reported: {keys:?}");
+            assert_eq!(keys[0].key, "root");
+            assert_eq!(keys[0].old.as_deref(), Some("{}"));
+            assert_eq!(keys[0].new.as_deref(), Some("[]"));
+        }
+        other => panic!("expected Keys, got {other:?}"),
+    }
+}
