@@ -587,10 +587,7 @@ fn fork_rejects_invalid_names() {
             .args(["fork", env.target.to_str().unwrap(), "--name", bad])
             .output()
             .unwrap();
-        assert!(
-            !out.status.success(),
-            "fork --name {bad:?} must be refused"
-        );
+        assert!(!out.status.success(), "fork --name {bad:?} must be refused");
     }
     // A name that merely contains a dot (not `..`) is still fine.
     let out = env
@@ -656,13 +653,13 @@ fn clap_parse_errors_exit_2_and_help_exits_0() {
     let env = Env::new();
     // Parse errors: clap's convention is exit code 2.
     let cases: &[&[&str]] = &[
-        &[],                                  // no subcommand
-        &["frobnicate"],                      // unknown subcommand
-        &["diff", "--frobnicate"],            // unknown flag
-        &["diff", "demo", "extra"],           // extra positional
-        &["run"],                             // missing required cmd
-        &["run", "demo"],                     // `--` + cmd missing
-        &["diff", "--json", "--json"],        // duplicate flag
+        &[],                           // no subcommand
+        &["frobnicate"],               // unknown subcommand
+        &["diff", "--frobnicate"],     // unknown flag
+        &["diff", "demo", "extra"],    // extra positional
+        &["run"],                      // missing required cmd
+        &["run", "demo"],              // `--` + cmd missing
+        &["diff", "--json", "--json"], // duplicate flag
     ];
     for args in cases {
         let out = env.cowt().args(*args).output().unwrap();
@@ -704,5 +701,9 @@ fn run_reports_signal_killed_child() {
         err.contains("killed by signal"),
         "signal death must be reported, stderr: {err}"
     );
-    assert_ne!(out.status.code(), Some(0), "signal death must exit non-zero");
+    assert_ne!(
+        out.status.code(),
+        Some(0),
+        "signal death must exit non-zero"
+    );
 }

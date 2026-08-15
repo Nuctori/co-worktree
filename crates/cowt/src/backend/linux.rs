@@ -208,7 +208,6 @@ impl FuseOverlayfs {
         pidfile: &Path,
     ) -> Result<(i32, String)> {
         eprintln!(
-        eprintln!(
             "cowt: kernel overlay (user namespace) over {} (upper: {})",
             mountpoint.display(),
             upper.display()
