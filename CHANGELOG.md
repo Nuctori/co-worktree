@@ -57,6 +57,24 @@ All notable changes to co-worktree are documented here.
   starttime comes from `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)`, with the FFI
   layout pinned by a size/offset unit test.
 
+### Added — round 21 (CRLF / line-ending / empty-file boundaries)
+
+- A non-empty `.wh.*` file in the upper layer is now treated as a plain user
+  file: it stays visible in `diff` and is written back by `apply` (previously
+  every `.wh.`-prefixed name was skipped, silently dropping real changes).
+- WinFsp / FUSE-T `create`+`mkdir` refuse `.wh.`-prefixed names (the reserved
+  deletion-marker namespace): a user-created 0-byte `.wh.notes.txt` can no
+  longer be mistaken for a deletion marker and delete an untouched host file
+  on `apply` (new E2E test on Windows).
+- Old-Mac lone-`\r` line endings no longer glue unified-diff lines together
+  (a deleted line hidden by the carriage-return overwrite); `\r` is treated
+  as a line terminator, CRLF untouched.
+- Corrupted manifests with an empty or truncated file hash are now rejected
+  loudly (`CorruptManifest`) instead of producing phantom diffs/conflicts.
+- Regression locks: CRLF minimal hunks, LF↔CRLF conversion, trailing-newline
+  marker, BOM, mixed endings, and 0-byte-file boundaries across
+  scan/diff/merge/apply.
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX

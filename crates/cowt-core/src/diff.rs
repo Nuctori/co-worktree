@@ -199,11 +199,29 @@ pub fn unified_diff(old: &str, new: &str) -> String {
     TextDiff::configure()
         .algorithm(Algorithm::Myers)
         .deadline(std::time::Instant::now() + std::time::Duration::from_secs(5))
-        .diff_lines(old, new)
+        .diff_lines(&normalize_lone_cr(old), &normalize_lone_cr(new))
         .unified_diff()
         .context_radius(3)
         .header("base", "worktree")
         .to_string()
+}
+
+/// Old-Mac line endings terminate lines with a lone `\r` (no `\n`). similar's
+/// emitter treats a token ending in `\r` as already terminated and fails to
+/// emit the `\n`, gluing diff lines together — a deleted line is then hidden
+/// by the carriage-return overwrite in terminal output. Normalize lone `\r`
+/// to `\n` before diffing; CRLF (`\r\n`) is left intact (round-21).
+fn normalize_lone_cr(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut chars = s.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c == '\r' && chars.peek() != Some(&'\n') {
+            out.push('\n');
+        } else {
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// If both paths carry a structured-document extension (.json/.yaml/.yml) and

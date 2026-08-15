@@ -610,3 +610,212 @@ fn set_mtime(p: &std::path::Path, t: std::time::SystemTime) {
     let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
     let _ = f.set_times(std::fs::FileTimes::new().set_modified(t));
 }
+
+// ---------------------------------------------------------------- R21
+
+/// Round-21: a non-empty `.wh.*`-prefixed file in the upper layer is a user
+/// file, NOT a deletion marker — it must stay visible in the effective
+/// manifest (a plain name-prefix skip would silently drop real changes).
+#[test]
+fn overlay_keeps_non_whiteout_wh_prefixed_entries() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let upper = tmp.path().join("upper");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&upper).unwrap();
+    write(&base, "notes.txt", "base");
+    write(&upper, ".wh.kept", "user content");
+
+    let base_m = Manifest::scan(&base).unwrap().manifest;
+    let effective = overlay::effective_manifest(&base_m, &upper).unwrap();
+    let kept = effective
+        .get(Path::new(".wh.kept"))
+        .expect(".wh.kept (non-empty) must be a visible entry, not skipped");
+    assert_eq!(kept.kind, EntryKind::File);
+    assert!(kept.hash.is_some());
+
+    // The real deletion encoding (0-size .wh.<name>) still folds.
+    write(&upper, ".wh.notes.txt", "");
+    let effective = overlay::effective_manifest(&base_m, &upper).unwrap();
+    assert!(effective.get(Path::new("notes.txt")).is_none());
+}
+
+/// Round-21: old-Mac lone-\r line endings must not glue unified diff lines
+/// together (a deleted line hidden by a carriage-return overwrite).
+#[test]
+fn unified_diff_lone_cr_terminates_lines() {
+    let u = diff::unified_diff("a\nb\r", "a\nc\r");
+    assert!(u.lines().any(|l| l == "-b"), "deleted line lost:\n{u}");
+    assert!(u.lines().any(|l| l == "+c"), "added line lost:\n{u}");
+    assert!(!u.contains('\r'), "lone CR leaked into unified output:\n{u}");
+}
+
+/// Round-21: corrupted manifests with an empty/garbage hash must fail loudly
+/// instead of producing phantom Modified changes.
+#[test]
+fn manifest_from_json_rejects_invalid_hash() {
+    let bad = r#"{"base":"/x","created_epoch":0,"entries":{"f":{"kind":"file","size":0,"mode":0,"mtime_ns":0,"hash":""}}}"#;
+    assert!(
+        Manifest::from_json(bad).is_err(),
+        "empty hash must be rejected"
+    );
+    let short = r#"{"base":"/x","created_epoch":0,"entries":{"f":{"kind":"file","size":0,"mode":0,"mtime_ns":0,"hash":"zz"}}}"#;
+    assert!(
+        Manifest::from_json(short).is_err(),
+        "non-64-hex hash must be rejected"
+    );
+    // Missing hash (unreadable file) is still accepted.
+    let none = r#"{"base":"/x","created_epoch":0,"entries":{"f":{"kind":"file","size":0,"mode":0,"mtime_ns":0}}}"#;
+    assert!(Manifest::from_json(none).is_ok());
+}
+
+/// Round-21 regression lock: CRLF / LF / trailing-newline / BOM / mixed
+/// line-ending handling must stay correct (currently all green).
+#[test]
+fn diff_line_endings_regressions() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let work = tmp.path().join("work");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&work).unwrap();
+
+    // (a) CRLF file, one line changed -> minimal hunk, no full-file noise.
+    write(&base, "a.txt", "l1\r\nl2\r\nl3\r\n");
+    write(&work, "a.txt", "l1\r\nl2x\r\nl3\r\n");
+    let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
+    let ch = changes.iter().find(|c| c.path == Path::new("a.txt")).unwrap();
+    match ch.detail.as_ref().unwrap() {
+        diff::ContentDiff::Text { unified } => {
+            assert!(unified.contains("+l2x"), "minimal hunk missing:\n{unified}");
+            assert!(!unified.contains("-l1") && !unified.contains("-l3"));
+        }
+        other => panic!("expected text diff, got {other:?}"),
+    }
+
+    // (b) same content LF->CRLF -> Modified, every line visible.
+    write(&base, "b.txt", "l1\nl2\nl3\n");
+    write(&work, "b.txt", "l1\r\nl2\r\nl3\r\n");
+    let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
+    let ch = changes.iter().find(|c| c.path == Path::new("b.txt")).unwrap();
+    assert_eq!(ch.kind, diff::ChangeKind::Modified);
+    match ch.detail.as_ref().unwrap() {
+        diff::ContentDiff::Text { unified } => {
+            assert!(
+                unified.contains("-l1") && unified.contains("+l1"),
+                "LF->CRLF must show the line change:\n{unified}"
+            );
+        }
+        other => panic!("expected text diff, got {other:?}"),
+    }
+
+    // (c) trailing-newline add -> Modified + explicit no-newline marker.
+    write(&base, "c.txt", "a\nb");
+    write(&work, "c.txt", "a\nb\n");
+    let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
+    let ch = changes.iter().find(|c| c.path == Path::new("c.txt")).unwrap();
+    match ch.detail.as_ref().unwrap() {
+        diff::ContentDiff::Text { unified } => {
+            assert!(
+                unified.contains("No newline at end of file"),
+                "missing no-newline marker:\n{unified}"
+            );
+        }
+        other => panic!("expected text diff, got {other:?}"),
+    }
+
+    // (d) BOM add/remove -> first line visible.
+    write(&base, "d.txt", "x\n");
+    write(&work, "d.txt", "\u{feff}x\n");
+    let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
+    let ch = changes.iter().find(|c| c.path == Path::new("d.txt")).unwrap();
+    match ch.detail.as_ref().unwrap() {
+        diff::ContentDiff::Text { unified } => {
+            assert!(
+                unified.contains("-x") || unified.contains("+x"),
+                "BOM change must be visible:\n{unified}"
+            );
+        }
+        other => panic!("expected text diff, got {other:?}"),
+    }
+
+    // (e) mixed endings: lone \r mid-file, one line changed -> only that line.
+    write(&base, "e.txt", "l1\nl2\rl3\n");
+    write(&work, "e.txt", "l1\nl2X\rl3\n");
+    let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
+    let ch = changes.iter().find(|c| c.path == Path::new("e.txt")).unwrap();
+    match ch.detail.as_ref().unwrap() {
+        diff::ContentDiff::Text { unified } => {
+            assert!(unified.contains("l2X"), "changed line missing:\n{unified}");
+            assert!(!unified.contains("-l1") && !unified.contains("-l3"));
+        }
+        other => panic!("expected text diff, got {other:?}"),
+    }
+}
+
+/// Round-21 regression lock: empty-file (0-byte) boundaries across
+/// scan / diff / merge / apply.
+#[test]
+fn empty_file_boundaries() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let work = tmp.path().join("work");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&work).unwrap();
+
+    // Scan: a 0-byte file gets a real (non-empty) BLAKE3 hash.
+    write(&base, "e.txt", "");
+    let bm = Manifest::scan(&base).unwrap().manifest;
+    let e = bm.get(Path::new("e.txt")).unwrap();
+    assert_eq!(e.size, 0);
+    let h = e.hash.as_ref().expect("0-byte file must be hashed");
+    assert_eq!(h.len(), 64, "hash must be 64 hex chars, got {h:?}");
+
+    // "" vs "\n" -> Modified.
+    write(&work, "e.txt", "\n");
+    let wm = Manifest::scan(&work).unwrap().manifest;
+    let changes = diff::diff(&bm, &wm);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].kind, diff::ChangeKind::Modified);
+
+    // "" vs missing -> Deleted.
+    let edir = tmp.path().join("empty");
+    fs::create_dir_all(&edir).unwrap();
+    let em = Manifest::scan(&edir).unwrap().manifest;
+    let changes = diff::diff(&bm, &em);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].kind, diff::ChangeKind::Deleted);
+
+    // missing vs "" -> Added.
+    let changes = diff::diff(&em, &bm);
+    assert_eq!(changes.len(), 1);
+    assert_eq!(changes[0].kind, diff::ChangeKind::Added);
+
+    // Merge: base empty file + host deleted + work non-empty -> DeleteVsModify.
+    let host = tmp.path().join("host");
+    let work2 = tmp.path().join("work2");
+    fs::create_dir_all(&host).unwrap();
+    fs::create_dir_all(&work2).unwrap();
+    write(&work2, "e.txt", "content"); // work modified the empty base file
+    write(&work2, "f.txt", "content");
+    let plan = merge::plan(&bm, &em, &scan(&work2), &work2);
+    assert!(
+        plan.conflicts
+            .iter()
+            .any(|c| c.path == Path::new("e.txt")
+                && c.kind == merge::ConflictKind::DeleteVsModify),
+        "empty-file delete-vs-modify must conflict: {:?}",
+        plan.conflicts
+    );
+
+    // WriteFile of a 0-byte source -> target exists with len 0.
+    let host2 = tmp.path().join("host2");
+    let work3 = tmp.path().join("work3");
+    fs::create_dir_all(&host2).unwrap();
+    fs::create_dir_all(&work3).unwrap();
+    write(&work3, "g.txt", "");
+    let plan = merge::plan(&em, &scan(&host2), &scan(&work3), &work3);
+    assert!(plan.is_clean());
+    merge::execute(&plan, &host2).unwrap();
+    let meta = fs::metadata(host2.join("g.txt")).unwrap();
+    assert_eq!(meta.len(), 0);
+}

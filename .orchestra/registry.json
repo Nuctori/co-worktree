@@ -1,0 +1,621 @@
+{
+  "version": 1,
+  "tasks": {
+    "t1": {
+      "id": "t1",
+      "subject": "R21 cowt-core/diff: 空白/行尾 (CRLF) 与空文件边界",
+      "source": "agent",
+      "deps": [],
+      "acceptance": {
+        "files": [
+          ".audits/round-21.json"
+        ],
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true
+      },
+      "status": "running",
+      "runs": [],
+      "createdAt": 1786813635021,
+      "updatedAt": 1786813694782
+    },
+    "t2": {
+      "id": "t2",
+      "subject": "R22 cowt CLI: 参数解析边界/错误消息/退出码/usage",
+      "source": "agent",
+      "deps": [
+        "t1"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-21.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t3": {
+      "id": "t3",
+      "subject": "R23 cowt-core/manifest: id 校验/路径规范化/损坏状态恢复",
+      "source": "agent",
+      "deps": [
+        "t2"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-22.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t4": {
+      "id": "t4",
+      "subject": "R24 cowt apply: 失败原子性/部分应用回滚",
+      "source": "agent",
+      "deps": [
+        "t3"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-23.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t5": {
+      "id": "t5",
+      "subject": "R25 cowt-core/merge: 三方冲突角点 (重命名冲突/dir↔file 互换)",
+      "source": "agent",
+      "deps": [
+        "t4"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-24.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t6": {
+      "id": "t6",
+      "subject": "R26 cowt run: env/cwd 传播、信号转发、退出码传播",
+      "source": "agent",
+      "deps": [
+        "t5"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-25.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t7": {
+      "id": "t7",
+      "subject": "R27 cowt-core/overlay: 符号链接层语义/嵌套目录",
+      "source": "agent",
+      "deps": [
+        "t6"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-26.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t8": {
+      "id": "t8",
+      "subject": "R28 cowt state: pidfile 竞态/锁文件/并发访问",
+      "source": "agent",
+      "deps": [
+        "t7"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-27.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t9": {
+      "id": "t9",
+      "subject": "R29 unicode: NFC/NFD 规范化、非 UTF-8 文件名",
+      "source": "agent",
+      "deps": [
+        "t8"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-28.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t10": {
+      "id": "t10",
+      "subject": "R30 cowt-core/diff: 仅权限变化/仅 mtime 变化检测",
+      "source": "agent",
+      "deps": [
+        "t9"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-29.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t11": {
+      "id": "t11",
+      "subject": "R31 cowt drop: --force 边界/缺失 worktree/运行中 drop",
+      "source": "agent",
+      "deps": [
+        "t10"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-30.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t12": {
+      "id": "t12",
+      "subject": "R32 资源上限: 巨树/深嵌套/fd 耗尽",
+      "source": "agent",
+      "deps": [
+        "t11"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-31.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t13": {
+      "id": "t13",
+      "subject": "R33 cowt list: 输出格式/排序/状态正确性",
+      "source": "agent",
+      "deps": [
+        "t12"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-32.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t14": {
+      "id": "t14",
+      "subject": "R34 cowt-core/manifest: 版本字段/前后兼容/未知字段",
+      "source": "agent",
+      "deps": [
+        "t13"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-33.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t15": {
+      "id": "t15",
+      "subject": "R35 cowt fork: id 冲突/不存在源/运行中 fork",
+      "source": "agent",
+      "deps": [
+        "t14"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-34.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t16": {
+      "id": "t16",
+      "subject": "R36 崩溃窗口: apply 暂存期/manifest 写期/卸载期强杀",
+      "source": "agent",
+      "deps": [
+        "t15"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-35.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t17": {
+      "id": "t17",
+      "subject": "R37 cowt doctor: 准确性/后端探测边界",
+      "source": "agent",
+      "deps": [
+        "t16"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-36.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t18": {
+      "id": "t18",
+      "subject": "R38 大小写敏感性: 大小写重命名/8.3 短名细化",
+      "source": "agent",
+      "deps": [
+        "t17"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-37.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t19": {
+      "id": "t19",
+      "subject": "R39 cowt-core/merge: scan→apply TOCTOU/外部并发修改",
+      "source": "agent",
+      "deps": [
+        "t18"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-38.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    },
+    "t20": {
+      "id": "t20",
+      "subject": "R40 跨平台收尾: 路径分隔符/Windows 保留名 (CON/NUL)/收尾审计",
+      "source": "agent",
+      "deps": [
+        "t19"
+      ],
+      "acceptance": {
+        "commands": [
+          "cargo test --workspace"
+        ],
+        "commit": true,
+        "files": [
+          ".audits/round-39.json"
+        ]
+      },
+      "status": "planned",
+      "runs": [],
+      "createdAt": 1786813651659,
+      "updatedAt": 1786813651659
+    }
+  },
+  "batches": {
+    "b1": {
+      "id": "b1",
+      "name": "rounds-21-25",
+      "taskIds": [
+        "t1",
+        "t2",
+        "t3",
+        "t4",
+        "t5"
+      ],
+      "createdAt": 1786813665388
+    },
+    "b2": {
+      "id": "b2",
+      "name": "rounds-26-30",
+      "taskIds": [
+        "t6",
+        "t7",
+        "t8",
+        "t9",
+        "t10"
+      ],
+      "createdAt": 1786813665389
+    },
+    "b3": {
+      "id": "b3",
+      "name": "rounds-31-35",
+      "taskIds": [
+        "t11",
+        "t12",
+        "t13",
+        "t14",
+        "t15"
+      ],
+      "createdAt": 1786813665389
+    },
+    "b4": {
+      "id": "b4",
+      "name": "rounds-36-40",
+      "taskIds": [
+        "t16",
+        "t17",
+        "t18",
+        "t19",
+        "t20"
+      ],
+      "createdAt": 1786813665390
+    }
+  },
+  "dispatchQueue": [
+    "t1"
+  ],
+  "events": [
+    {
+      "at": 1786813614348,
+      "kind": "scope",
+      "detail": "scope=orchestra subtasks=20 deps=串行链"
+    },
+    {
+      "at": 1786813635021,
+      "kind": "plan",
+      "taskId": "t1",
+      "detail": "R21 cowt-core/diff: 空白/行尾 (CRLF) 与空文件边界"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t2",
+      "detail": "R22 cowt CLI: 参数解析边界/错误消息/退出码/usage"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t3",
+      "detail": "R23 cowt-core/manifest: id 校验/路径规范化/损坏状态恢复"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t4",
+      "detail": "R24 cowt apply: 失败原子性/部分应用回滚"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t5",
+      "detail": "R25 cowt-core/merge: 三方冲突角点 (重命名冲突/dir↔file 互换)"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t6",
+      "detail": "R26 cowt run: env/cwd 传播、信号转发、退出码传播"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t7",
+      "detail": "R27 cowt-core/overlay: 符号链接层语义/嵌套目录"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t8",
+      "detail": "R28 cowt state: pidfile 竞态/锁文件/并发访问"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t9",
+      "detail": "R29 unicode: NFC/NFD 规范化、非 UTF-8 文件名"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t10",
+      "detail": "R30 cowt-core/diff: 仅权限变化/仅 mtime 变化检测"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t11",
+      "detail": "R31 cowt drop: --force 边界/缺失 worktree/运行中 drop"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t12",
+      "detail": "R32 资源上限: 巨树/深嵌套/fd 耗尽"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t13",
+      "detail": "R33 cowt list: 输出格式/排序/状态正确性"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t14",
+      "detail": "R34 cowt-core/manifest: 版本字段/前后兼容/未知字段"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t15",
+      "detail": "R35 cowt fork: id 冲突/不存在源/运行中 fork"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t16",
+      "detail": "R36 崩溃窗口: apply 暂存期/manifest 写期/卸载期强杀"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t17",
+      "detail": "R37 cowt doctor: 准确性/后端探测边界"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t18",
+      "detail": "R38 大小写敏感性: 大小写重命名/8.3 短名细化"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t19",
+      "detail": "R39 cowt-core/merge: scan→apply TOCTOU/外部并发修改"
+    },
+    {
+      "at": 1786813651659,
+      "kind": "plan",
+      "taskId": "t20",
+      "detail": "R40 跨平台收尾: 路径分隔符/Windows 保留名 (CON/NUL)/收尾审计"
+    },
+    {
+      "at": 1786813694782,
+      "kind": "dispatch",
+      "taskId": "t1",
+      "detail": ""
+    }
+  ],
+  "seq": 20,
+  "scope": {
+    "mode": "orchestra",
+    "shape": {
+      "subtasks": 20,
+      "deps": "串行链",
+      "handoffs": "提交+CI绿",
+      "acceptance": "CI三平台E2E全绿+测试"
+    },
+    "decidedAt": 1786813614348,
+    "decidedBy": "agent"
+  }
+}

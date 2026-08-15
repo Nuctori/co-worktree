@@ -419,14 +419,6 @@ impl Filesystem for CowFs {
         }
     }
 
-    fn mkdir(
-        &mut self,
-        _req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        _mode: u32,
-        _umask: u32,
-        reply: ReplyEntry,
     ) {
         let Some(rel) = self
             .inos
@@ -437,6 +429,17 @@ impl Filesystem for CowFs {
         else {
             return reply.error(libc::ENOENT);
         };
+        // `.wh.` is the reserved whiteout namespace; a user file with that
+        // prefix would be indistinguishable from a deletion marker at apply
+        // time — refuse, same as the winfsp backend (round-21).
+        if rel
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with(WHITEOUT_PREFIX))
+            .unwrap_or(false)
+        {
+            return reply.error(libc::EPERM);
+        }
         self.clear_whiteout(&rel);
         if let Err(e) = fs::create_dir_all(self.upper_of(&rel)) {
             return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
@@ -713,15 +716,6 @@ impl Filesystem for CowFs {
         reply.ok();
     }
 
-    fn create(
-        &mut self,
-        _req: &Request<'_>,
-        parent: u64,
-        name: &OsStr,
-        _mode: u32,
-        _umask: u32,
-        flags: i32,
-        reply: ReplyCreate,
     ) {
         let Some(rel) = self
             .inos
@@ -732,6 +726,17 @@ impl Filesystem for CowFs {
         else {
             return reply.error(libc::ENOENT);
         };
+        // `.wh.` is the reserved whiteout namespace; a user file with that
+        // prefix would be indistinguishable from a deletion marker at apply
+        // time — refuse, same as the winfsp backend (round-21).
+        if rel
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with(WHITEOUT_PREFIX))
+            .unwrap_or(false)
+        {
+            return reply.error(libc::EPERM);
+        }
         self.clear_whiteout(&rel);
         let dst = self.upper_of(&rel);
         if let Some(p) = dst.parent() {

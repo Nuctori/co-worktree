@@ -72,15 +72,18 @@ pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
         entries.retain(|p, _| !p.starts_with(&prefix));
     }
 
-    // 3. Everything present in upper overrides base.
+    // 3. Everything present in upper overrides base. A `.wh.`-prefixed name
+    //    is skipped only when it is an *actual* whiteout (0-byte marker or
+    //    char device — already folded into `deleted` above). A non-empty
+    //    `.wh.x` is a plain user file and must stay visible, otherwise real
+    //    changes are silently dropped (round-21).
     for (rel, entry) in scan.entries {
-        // Skip overlay internal names if any slipped through.
-        if rel
+        let wh_name = rel
             .file_name()
             .and_then(|n| n.to_str())
             .map(|n| n.starts_with(WHITEOUT_PREFIX))
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+        if wh_name && is_wh_prefixed_whiteout(&upper.join(&rel)) {
             continue;
         }
         entries.insert(rel, entry);

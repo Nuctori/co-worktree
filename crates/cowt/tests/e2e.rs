@@ -1470,6 +1470,37 @@ fn e2e_path_traversal_blocked() {
     env.cowt_ok(&["drop", &id]);
 }
 
+/// Round-21: the `.wh.` prefix is the reserved deletion-marker namespace.
+/// Creating a user file with that prefix through the view must be refused on
+/// the winfsp backend (where cowt owns create) — otherwise a 0-byte
+/// `.wh.notes.txt` is indistinguishable from a deletion marker and
+/// `cowt apply` would delete the host's notes.txt the user never touched.
+#[cfg(windows)]
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_wh_prefix_create_refused() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let (app, id) = seeded_app(&env);
+    let mut sleeper = spawn_sleeper(&env, &id, 6);
+    // Creating a `.wh.`-prefixed name through the view must fail.
+    let r = fs::write(app.join(".wh.probe"), "content");
+    assert!(r.is_err(), ".wh.* create must be refused, got Ok");
+    // Ordinary names still work through the same view.
+    fs::write(app.join("ok.txt"), "content").unwrap();
+    wait_run(&mut sleeper);
+    assert_mount_gone(&app);
+    env.cowt_ok(&["apply", &id]);
+    assert_eq!(fs::read_to_string(app.join("ok.txt")).unwrap(), "content");
+    assert!(
+        !app.join(".wh.probe").exists(),
+        ".wh.probe must never land on the host"
+    );
+    env.cowt_ok(&["drop", &id]);
+}
+
 /// Adversarial: a symlink/junction ring planted in the upper layer (any
 /// process can create one during `cowt run`) must not make diff/apply walk
 /// an external tree or crash (stack overflow — reproduced pre-fix).

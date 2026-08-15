@@ -261,7 +261,25 @@ impl Manifest {
 
     /// Deserialize from JSON.
     pub fn from_json(s: &str) -> Result<Manifest> {
-        serde_json::from_str(s).map_err(|e| Error::CorruptManifest(e.to_string()))
+        let m: Manifest =
+            serde_json::from_str(s).map_err(|e| Error::CorruptManifest(e.to_string()))?;
+        // A hash that is present must be a full 64-hex BLAKE3 digest. An empty
+        // or truncated hash would make content_eq report phantom changes and
+        // merge invent conflicts — fail loudly instead (round-21).
+        for (rel, e) in &m.entries {
+            if e.kind == EntryKind::File {
+                if let Some(h) = &e.hash {
+                    let ok = h.len() == 64 && h.bytes().all(|b| b.is_ascii_hexdigit());
+                    if !ok {
+                        return Err(Error::CorruptManifest(format!(
+                            "invalid hash for {}",
+                            rel.display()
+                        )));
+                    }
+                }
+            }
+        }
+        Ok(m)
     }
 
     /// Look up an entry by relative path.

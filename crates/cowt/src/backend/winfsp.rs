@@ -771,6 +771,18 @@ impl FileSystemContext for CowFs {
         file_info: &mut OpenFileInfo,
     ) -> FspResult<Self::FileContext> {
         let rel = rel_of(file_name);
+        // `.wh.` is the reserved whiteout namespace. Creating a user file
+        // with that prefix would be indistinguishable from a deletion marker
+        // at apply time (a 0-byte `.wh.notes.txt` deletes the host's
+        // notes.txt the user never touched) — refuse (round-21).
+        if rel
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with(WHITEOUT_PREFIX))
+            .unwrap_or(false)
+        {
+            return Err(FspError::IO(ErrorKind::PermissionDenied));
+        }
         let dst = self.upper_of(&rel);
         // A leftover whiteout (delete-then-recreate) must not shadow the
         // freshly created entry.
