@@ -61,6 +61,16 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     if foreign_mount || backend.is_mounted(&meta.target) {
+        if dir.join("real").exists() {
+            // Our own stale state: the mount could not be torn down because
+            // something blocks the target (external dir, permissions).
+            bail!(
+                "{} is blocked by leftover state (host dir still moved aside at {}); \
+                 clear the blocker at the mount point, then drop again",
+                meta.target.display(),
+                dir.join("real").display()
+            );
+        }
         bail!(
             "{} is mounted by something else (not a cowt leftover); refusing to unmount it",
             meta.target.display()
@@ -72,6 +82,18 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
     // `cowt run` may still be tearing down its WinFsp mount (inside the state
     // dir), so retry the deletion briefly. Old `.trash-*` leftovers from
     // previously failed drops are swept first.
+    //
+    // NEVER delete a state dir that still holds the moved-aside HOST
+    // directory: `real` is the user's actual data (macOS can strand it when
+    // the mountpoint symlink was removed externally — a subsequent drop
+    // would silently destroy the host directory).
+    if dir.join("real").exists() {
+        bail!(
+            "the host directory is still moved aside at {}; refusing to delete it. \
+             Restore it (or clear the blocker at the mount point) and drop again",
+            dir.join("real").display()
+        );
+    }
     let trash = state.root().join(format!(
         ".trash-{}-{}",
         meta.id,

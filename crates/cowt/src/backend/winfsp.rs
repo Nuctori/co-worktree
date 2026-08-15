@@ -213,9 +213,18 @@ impl Backend for WinFspBackend {
         })();
         if result.is_err() {
             // Roll back: drop the mountpoint (if any) and move the host dir
-            // back into place.
-            let _ = cleanup_mountpoint(mountpoint);
-            let _ = restore(mountpoint, &layout);
+            // back into place. Surface rollback failures — a stranded `real`
+            // is the user's actual data.
+            if let Err(e) = cleanup_mountpoint(mountpoint) {
+                eprintln!("cowt: warning: cleanup mountpoint failed: {e:#}");
+            }
+            if let Err(e) = restore(mountpoint, &layout) {
+                eprintln!(
+                    "cowt: warning: restore of the host directory failed: {e:#} — \
+                     it is still at {}",
+                    layout.real.display()
+                );
+            }
         }
         result
     }

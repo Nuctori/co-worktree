@@ -924,13 +924,20 @@ impl Backend for FuseT {
         })();
         if result.is_err() {
             // Roll back: drop the symlink and move the host dir back.
+            // Surface restore failure — a stranded `real` is user data.
             if fs::symlink_metadata(mountpoint)
                 .map(|m| m.file_type().is_symlink())
                 .unwrap_or(false)
             {
                 let _ = fs::remove_file(mountpoint);
             }
-            let _ = restore(mountpoint, &layout);
+            if let Err(e) = restore(mountpoint, &layout) {
+                eprintln!(
+                    "cowt: warning: restore of the host directory failed: {e:#} — \
+                     it is still at {}",
+                    layout.real.display()
+                );
+            }
         }
         result
     }
