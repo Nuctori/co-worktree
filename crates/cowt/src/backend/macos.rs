@@ -715,9 +715,30 @@ fn mount_cow(
         MountOption::AutoUnmount,
         MountOption::DefaultPermissions,
     ];
+    // FUSE-T mounts over NFS, which is asynchronous: Session::new returns
+    // before the mount is actually reachable. Poll until the mountpoint's
+    // st_dev changes (a mounted volume has a different device id).
+    let dev_before = fs::metadata(mountpoint)
+        .map(|m| m.dev())
+        .unwrap_or(u64::MAX);
     let session = Session::new(fs, mountpoint, &options)
         .with_context(|| format!("mount FUSE-T filesystem at {}", mountpoint.display()))?;
-    BackgroundSession::new(session).context("start FUSE-T session")
+    let background = BackgroundSession::new(session).context("start FUSE-T session")?;
+    let deadline = std::time::Instant::now() + Duration::from_secs(20);
+    loop {
+        let dev = fs::metadata(mountpoint).map(|m| m.dev()).unwrap_or(0);
+        if dev != dev_before && dev != 0 {
+            break;
+        }
+        if std::time::Instant::now() > deadline {
+            bail!(
+                "FUSE-T mount at {} never became reachable",
+                mountpoint.display()
+            );
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
+    Ok(background)
 }
 
 impl Backend for FuseT {
