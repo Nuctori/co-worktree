@@ -145,6 +145,20 @@ All notable changes to co-worktree are documented here.
 - Regression locks: partial-failure retry convergence, staging residue
   isolation (staging is outside the target and never scanned).
 
+### Added — round 25 (merge conflict corners: rename collisions, dir↔file swap residuals)
+
+- dir→file migration with host-only content directly under the migrated
+  directory now conflicts at plan time (the R24 host_only check only
+  covered pure deletes; the migration branch silently planned clean, then
+  deleted base children and failed forever on the non-empty dir).
+- dir→symlink migration now works on unix: `write_symlink` removes an
+  empty directory left at the destination (it previously only removed
+  files, so `symlink()` hit EEXIST every time).
+- Regression locks: rename-collision matrix (7 combinations), conflict
+  classification boundaries (BothAdded kind mismatches, converged dir
+  children), plan re-execution idempotency, and work-source-missing error
+  paths.
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX

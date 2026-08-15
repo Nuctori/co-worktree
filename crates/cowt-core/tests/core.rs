@@ -1154,3 +1154,277 @@ fn staging_dir_not_scanned_by_manifest_scan() {
     assert!(m.get(Path::new("leak.txt")).is_none());
     assert!(m.get(Path::new("real.txt")).is_some());
 }
+
+// ---------------------------------------------------------------- R25
+
+/// Round-25: dir→file migration with a host-only child directly under the
+/// migrated directory must conflict at plan time — not plan clean, delete
+/// the base child, then fail forever on the non-empty dir (the R24-02
+/// host_only check only covered the w=None pure-delete branch).
+#[test]
+fn dir_to_file_migration_with_host_only_child_conflicts() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "d/f.txt", "base");
+    write(&host, "d/f.txt", "base");
+    write(&host, "d/extra.txt", "host-only"); // not in base, not in work
+    write(&work, "d", "now-a-file"); // dir->file migration
+
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(
+        !plan.is_clean(),
+        "dir->file migration with host-only child must conflict: {:?}",
+        plan.conflicts
+    );
+    assert!(plan
+        .conflicts
+        .iter()
+        .any(|c| { c.path == *"d/extra.txt" && c.kind == merge::ConflictKind::ModifyVsDelete }));
+    // execute must refuse (conflict) and leave the base child intact.
+    assert!(merge::execute(&plan, &host).is_err());
+    assert!(
+        host.join("d/f.txt").exists(),
+        "failed apply must not destroy the base child"
+    );
+    assert_eq!(fs::read_to_string(host.join("d/f.txt")).unwrap(), "base");
+}
+
+/// Round-25: dir→symlink migration must apply on unix — write_symlink must
+/// remove an empty directory left at the destination (it only removed
+/// files, so symlink() hit EEXIST forever).
+#[cfg(unix)]
+#[test]
+fn merge_dir_to_symlink_migration() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "x/f.txt", "base");
+    write(&host, "x/f.txt", "base");
+    // work: x is now a symlink
+    std::os::unix::fs::symlink("target-dir", work.join("x")).unwrap();
+
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan.is_clean(), "conflicts: {:?}", plan.conflicts);
+    merge::execute(&plan, &host).unwrap();
+    let meta = fs::symlink_metadata(host.join("x")).unwrap();
+    assert!(meta.file_type().is_symlink(), "x must become a symlink");
+    assert_eq!(
+        fs::read_link(host.join("x")).unwrap(),
+        std::path::PathBuf::from("target-dir")
+    );
+    // The old child is gone (migration deletes the dir subtree).
+    assert!(!host.join("x/f.txt").exists());
+}
+
+/// Round-25 regression lock: rename collision matrix (focus 1).
+#[test]
+fn rename_collision_matrix() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+
+    // (1) work a->b + host modified a: a conflicts ModifyVsDelete.
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "a.txt", "v1");
+    write(&host, "a.txt", "host-edited");
+    write(&work, "b.txt", "v1"); // a deleted, b added
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan
+        .conflicts
+        .iter()
+        .any(|c| c.path == *"a.txt" && c.kind == merge::ConflictKind::ModifyVsDelete));
+    fs::remove_dir_all(&host).unwrap();
+    fs::create_dir_all(&host).unwrap();
+
+    // (2) work a->b + host created b with different content: BothAdded.
+    fs::remove_dir_all(&work).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    write(&base, "a.txt", "v1");
+    write(&host, "a.txt", "v1");
+    write(&host, "b.txt", "host-b");
+    write(&work, "b.txt", "work-b");
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan
+        .conflicts
+        .iter()
+        .any(|c| c.path == *"b.txt" && c.kind == merge::ConflictKind::BothAdded));
+    fs::remove_dir_all(&host).unwrap();
+    fs::create_dir_all(&host).unwrap();
+
+    // (3) work a->b + host renamed a->b with SAME content: converged, no ops.
+    write(&host, "b.txt", "work-b"); // host's rename matches work's exactly
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan.is_clean());
+    assert!(
+        plan.operations.is_empty(),
+        "no ops when converged: {:?}",
+        plan.operations
+    );
+    fs::remove_dir_all(&host).unwrap();
+    fs::create_dir_all(&host).unwrap();
+
+    // (4) host renamed a->c (different target), work renamed a->b:
+    // independent paths, clean plan (a deleted on both sides converges).
+    write(&host, "c.txt", "v1");
+
+    // (4) host renamed a->c, work renamed a->b: independent paths.
+    write(&host, "c.txt", "v1");
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan.is_clean());
+    fs::remove_dir_all(&host).unwrap();
+    fs::create_dir_all(&host).unwrap();
+
+    // (5) host built a DIRECTORY at b while work builds a file: BothAdded.
+    write(&host, "a.txt", "v1");
+    fs::create_dir_all(host.join("b.txt")).unwrap();
+    write(&host, "b.txt/inner", "x");
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan
+        .conflicts
+        .iter()
+        .any(|c| c.path == *"b.txt" && c.kind == merge::ConflictKind::BothAdded));
+}
+
+/// Round-25 regression lock: work a->b + host modified a AND b matches work:
+/// a conflicts, b converges, plan refuses (no partial apply).
+#[test]
+fn rename_collision_matrix_2() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "a.txt", "v1");
+    write(&host, "a.txt", "host-edited");
+    write(&host, "b.txt", "v2");
+    write(&work, "b.txt", "v2");
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan
+        .conflicts
+        .iter()
+        .any(|c| { c.path == *"a.txt" && c.kind == merge::ConflictKind::ModifyVsDelete }));
+    assert!(
+        plan.converged.contains(&PathBuf::from("b.txt")),
+        "b must converge"
+    );
+    assert!(plan.operations.is_empty(), "conflict => no ops");
+    assert!(
+        !plan.is_clean(),
+        "a conflict must refuse the plan despite b converging"
+    );
+}
+
+/// Round-25 regression lock: conflict classification boundaries (focus 3).
+#[test]
+fn both_added_kind_mismatch_and_converged_dir_children() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    // (a) both sides create dir b/ with a shared child of different content:
+    // dir converges, child conflicts.
+    write(&host, "b/shared.txt", "host-version");
+    write(&work, "b/shared.txt", "work-version");
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(
+        plan.conflicts
+            .iter()
+            .any(|c| c.path == *"b/shared.txt" && c.kind == merge::ConflictKind::BothAdded),
+        "shared child under both-created dir must conflict: {:?}",
+        plan.conflicts
+    );
+    assert!(
+        plan.converged.contains(&PathBuf::from("b")),
+        "the dir itself converges"
+    );
+    fs::remove_dir_all(&host).unwrap();
+    fs::create_dir_all(&host).unwrap();
+    fs::remove_dir_all(&work).unwrap();
+    fs::create_dir_all(&work).unwrap();
+
+    // (b) host creates a dir at p, work creates a file at p: BothAdded
+    // (kind mismatch is never content-equal).
+    fs::create_dir_all(host.join("p")).unwrap();
+    write(&work, "p", "file");
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan
+        .conflicts
+        .iter()
+        .any(|c| c.path == *"p" && c.kind == merge::ConflictKind::BothAdded));
+}
+
+/// Round-25 regression lock: re-planning after an apply converges (the
+/// normal retry path) and a work source vanishing after planning fails
+/// loudly with the work path, leaving the host untouched (focus 4/5).
+#[test]
+fn plan_repeat_idempotent_and_work_source_missing() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "a.txt", "v1");
+    write(&host, "a.txt", "v1");
+    write(&work, "a.txt", "v2");
+    write(&work, "b.txt", "v2");
+
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan.is_clean());
+    let r1 = merge::execute(&plan, &host).unwrap();
+    assert_eq!(r1.written, 2);
+    // Re-planning against the applied host converges: no ops, clean.
+    let plan2 = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan2.is_clean(), "re-plan after apply must be clean");
+    assert!(
+        plan2.operations.is_empty(),
+        "re-plan after apply must be a no-op: {:?}",
+        plan2.operations
+    );
+    assert_eq!(
+        fs::read_to_string(host.join("a.txt")).unwrap(),
+        "v2",
+        "repeat must not corrupt content"
+    );
+    assert_eq!(fs::read_to_string(host.join("b.txt")).unwrap(), "v2");
+    fs::remove_dir_all(&host).unwrap();
+    fs::create_dir_all(&host).unwrap();
+    fs::remove_dir_all(&host).unwrap();
+    fs::create_dir_all(&host).unwrap();
+
+    // Work source vanishes after planning: Phase-1 error names the work
+    // path and the host stays untouched.
+    write(&host, "a.txt", "v1");
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan.is_clean());
+    fs::remove_file(work.join("a.txt")).unwrap();
+    let err = merge::execute(&plan, &host).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("a.txt"),
+        "error must name the work source path: {msg}"
+    );
+    assert_eq!(
+        fs::read_to_string(host.join("a.txt")).unwrap(),
+        "v1",
+        "host must be untouched by a failed phase-1"
+    );
+}

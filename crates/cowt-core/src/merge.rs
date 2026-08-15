@@ -127,6 +127,21 @@ pub fn plan(base: &Manifest, current: &Manifest, work: &Manifest, work_root: &Pa
                     // hits the wrong kind and the change becomes un-applyable.
                     if let Some(b_entry) = b {
                         if b_entry.kind != entry.kind {
+                            // A dir->file / dir->symlink migration with host
+                            // content unknown to base cannot be applied: the
+                            // old dir would have to be removed while holding
+                            // the host's own files — surface a conflict
+                            // instead of a destructive failed apply
+                            // (round-25, mirrors the w=None branch below).
+                            let dir_to_non_dir =
+                                b_entry.kind == EntryKind::Dir && entry.kind != EntryKind::Dir;
+                            if dir_to_non_dir {
+                                let host_only = host_only_entries(base, current, &path);
+                                if !host_only.is_empty() {
+                                    push_host_only_conflicts(&mut out, current, host_only);
+                                    continue;
+                                }
+                            }
                             out.operations.push(Operation::Delete {
                                 path: path.clone(),
                                 migration: true,
@@ -145,25 +160,9 @@ pub fn plan(base: &Manifest, current: &Manifest, work: &Manifest, work_root: &Pa
                     // (round-24).
                     let dir_delete = matches!(b, Some(e) if e.kind == EntryKind::Dir);
                     if dir_delete {
-                        let host_only: Vec<&PathBuf> = current
-                            .entries
-                            .keys()
-                            .filter(|p| {
-                                p.starts_with(&path)
-                                    && **p != path
-                                    && !base.entries.contains_key(*p)
-                            })
-                            .collect();
+                        let host_only = host_only_entries(base, current, &path);
                         if !host_only.is_empty() {
-                            for p in host_only {
-                                out.conflicts.push(Conflict {
-                                    path: p.clone(),
-                                    kind: ConflictKind::ModifyVsDelete,
-                                    base_hash: None,
-                                    current_hash: current.entries.get(p).and_then(hash_of),
-                                    work_hash: None,
-                                });
-                            }
+                            push_host_only_conflicts(&mut out, current, host_only);
                             continue;
                         }
                     }
@@ -232,6 +231,33 @@ fn hash_of(e: &Entry) -> Option<String> {
             .as_ref()
             .map(|t| format!("symlink:{}", t.display()))
     })
+}
+
+/// Current (host) entries strictly below `dir` that are absent from base —
+/// the host created them after the fork. Shared by the pure-delete branch
+/// and the dir->file/symlink migration branch (round-24/25).
+fn host_only_entries<'a>(
+    base: &'a Manifest,
+    current: &'a Manifest,
+    dir: &Path,
+) -> Vec<&'a PathBuf> {
+    current
+        .entries
+        .keys()
+        .filter(|p| p.starts_with(dir) && **p != *dir && !base.entries.contains_key(*p))
+        .collect()
+}
+
+fn push_host_only_conflicts(out: &mut MergePlan, current: &Manifest, host_only: Vec<&PathBuf>) {
+    for p in host_only {
+        out.conflicts.push(Conflict {
+            path: p.clone(),
+            kind: ConflictKind::ModifyVsDelete,
+            base_hash: None,
+            current_hash: current.entries.get(p).and_then(hash_of),
+            work_hash: None,
+        });
+    }
 }
 
 fn write_op(path: &Path, entry: &Entry, work_root: &Path) -> Operation {
@@ -461,7 +487,19 @@ fn write_symlink(target: &Path, dest: &Path) -> Result<()> {
     if let Some(p) = dest.parent() {
         fs::create_dir_all(p).map_err(|e| Error::io(p.to_path_buf(), e))?;
     }
-    let _ = fs::remove_file(dest); // replace existing link/file
+    // Kind migration dir->symlink: the old entry is a directory whose
+    // children were already deleted by the migration Delete — remove the
+    // (now empty) dir, mirroring commit_rename. Anything else (file or
+    // symlink) is simply replaced (round-25).
+    match fs::symlink_metadata(dest) {
+        Ok(m) if m.is_dir() => {
+            fs::remove_dir(dest).map_err(|e| Error::io(dest.to_path_buf(), e))?;
+        }
+        Ok(_) => {
+            let _ = fs::remove_file(dest); // replace existing link/file
+        }
+        Err(_) => {}
+    }
     std::os::unix::fs::symlink(target, dest).map_err(|e| Error::io(dest.to_path_buf(), e))
 }
 
