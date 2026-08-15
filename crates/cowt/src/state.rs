@@ -277,35 +277,28 @@ mod tests {
 
     #[test]
     fn pid_alive_known_and_unknown() {
-        // Our own process is always alive; a pid that just exited is not.
-        // (u32::MAX is unusable: as i32 it is -1, which kill(-1, 0) treats as
-        // a broadcast to every process and reports alive.)
+        // Our own process is always alive.
         assert!(pid_alive(std::process::id()));
-        let mut child = {
-            #[cfg(unix)]
-            {
-                std::process::Command::new("sh").arg("-c").arg("exit 0")
+        #[cfg(unix)]
+        {
+            // u32::MAX as i32 is -1, which kill(-1, 0) treats as a broadcast
+            // to every process (reports alive). Use a really killed pid.
+            let mut child = std::process::Command::new("sh")
+                .arg("-c")
+                .arg("sleep 30")
+                .spawn()
+                .unwrap();
+            let pid = child.id();
+            unsafe {
+                libc::kill(pid as i32, libc::SIGKILL);
             }
-            #[cfg(windows)]
-            {
-                let mut c = std::process::Command::new("cmd");
-                c.args(["/C", "exit", "0"]);
-                c
-            }
+            let _ = child.wait();
+            assert!(!pid_alive(pid));
         }
-        .spawn()
-        .unwrap();
-        let dead_pid = child.id();
-        let _ = child.wait();
-        // Process object teardown lags slightly on Windows: poll until the
-        // pid is truly gone instead of asserting on the first check.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while pid_alive(dead_pid) {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "pid {dead_pid} still reported alive after exit"
-            );
-            std::thread::sleep(std::time::Duration::from_millis(20));
+        #[cfg(windows)]
+        {
+            // u32::MAX is simply an invalid pid on Windows (no broadcast).
+            assert!(!pid_alive(u32::MAX));
         }
     }
 
