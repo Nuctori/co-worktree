@@ -172,6 +172,14 @@ impl FuseOverlayfs {
             .with_context(|| format!("spawn '{}'", cmd[0]))?;
         super::write_pidfile(pidfile, child.id());
         let result = child.wait();
+        // Lazy copy-up: a renamed lower dir has no materialized children in
+        // upper; copy them from the still-mounted view so the offline scan
+        // (diff/apply) matches what the program saw (else apply drops them).
+        // Userns mode cannot do this from here (the mount lives in a private
+        // namespace) — documented limitation.
+        if let Err(e) = super::materialize_lazy_upper(mountpoint, upper) {
+            eprintln!("cowt: warning: materialize upper failed: {e:#}");
+        }
         match self.unmount(mountpoint) {
             Ok(()) => guard.disarm(),
             Err(e) => eprintln!("cowt: warning: unmount failed: {e:#}"),

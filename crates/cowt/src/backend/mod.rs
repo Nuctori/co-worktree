@@ -63,6 +63,16 @@ pub trait Backend: Send + Sync {
             .map_err(|e| anyhow::anyhow!("spawn '{}': {e}", cmd[0]))?;
         write_pidfile(pidfile, child.id());
         let result = child.wait();
+        // Kernel overlayfs renames a lower directory lazily: upper/ holds the
+        // renamed dir but its children stay un-materialized (resolved through
+        // lower while mounted). Materialize them while the view is still
+        // mounted so the offline upper scan (diff/apply) sees the children —
+        // otherwise apply would drop them. Only dirs that exist in upper are
+        // walked, so untouched lower files are never copied.
+        #[cfg(target_os = "linux")]
+        if let Err(e) = materialize_lazy_upper(mountpoint, upper) {
+            eprintln!("cowt: warning: materialize upper failed: {e:#}");
+        }
         // teardown() drops the in-process mount host first (WinFsp/FUSE-T),
         // then restores the host directory; on unix it is a plain unmount.
         if let Err(e) = guard.teardown() {
@@ -71,6 +81,50 @@ pub trait Backend: Send + Sync {
         let status = result.map_err(|e| anyhow::anyhow!("wait for child: {e}"))?;
         Ok(status.code().unwrap_or(1))
     }
+}
+
+/// After a run, kernel overlayfs may have lazily copied up a renamed lower
+/// directory: the dir exists in upper but its children are not materialized
+/// (they resolve through lower while mounted). Copy any missing children
+/// from the still-mounted merged view into upper, recursively, so the
+/// offline upper scan matches what the view showed.
+#[cfg(target_os = "linux")]
+pub(crate) fn materialize_lazy_upper(view: &Path, upper: &Path) -> std::io::Result<()> {
+    for e in std::fs::read_dir(upper)? {
+        let e = e?;
+        let name = e.file_name();
+        let s = name.to_string_lossy();
+        if s.starts_with(".wh.") {
+            continue;
+        }
+        if !e.file_type()?.is_dir() {
+            continue;
+        }
+        let view_dir = view.join(&name);
+        let upper_dir = upper.join(&name);
+        if std::fs::symlink_metadata(&view_dir).is_ok() {
+            for ve in std::fs::read_dir(&view_dir)? {
+                let ve = ve?;
+                let vname = ve.file_name();
+                let vs = vname.to_string_lossy();
+                if vs.starts_with(".wh.") {
+                    continue;
+                }
+                let dst = upper_dir.join(&vname);
+                if std::fs::symlink_metadata(&dst).is_ok() {
+                    continue;
+                }
+                let vft = ve.file_type()?;
+                if vft.is_dir() {
+                    std::fs::create_dir_all(&dst)?;
+                } else if vft.is_file() {
+                    std::fs::copy(ve.path(), &dst)?;
+                }
+            }
+        }
+        materialize_lazy_upper(&view_dir, &upper_dir)?;
+    }
+    Ok(())
 }
 /// Record the running child's pid (best effort — drop still verifies /proc).
 pub(crate) fn write_pidfile(path: &Path, pid: u32) {
