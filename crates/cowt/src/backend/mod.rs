@@ -63,15 +63,15 @@ pub trait Backend: Send + Sync {
             .map_err(|e| anyhow::anyhow!("spawn '{}': {e}", cmd[0]))?;
         write_pidfile(pidfile, child.id());
         let result = child.wait();
-        match self.unmount(mountpoint) {
-            Ok(()) => guard.disarm(),
-            Err(e) => eprintln!("cowt: warning: unmount failed: {e:#}"),
+        // teardown() drops the in-process mount host first (WinFsp/FUSE-T),
+        // then restores the host directory; on unix it is a plain unmount.
+        if let Err(e) = guard.teardown() {
+            eprintln!("cowt: warning: unmount failed: {e:#}");
         }
         let status = result.map_err(|e| anyhow::anyhow!("wait for child: {e}"))?;
         Ok(status.code().unwrap_or(1))
     }
 }
-
 /// Record the running child's pid (best effort — drop still verifies /proc).
 pub(crate) fn write_pidfile(path: &Path, pid: u32) {
     let _ = std::fs::write(path, pid.to_string());
@@ -87,6 +87,8 @@ pub struct MountGuard {
     #[cfg(windows)]
     #[allow(dead_code)] // written once, read by Drop semantics
     host: Option<winfsp::CowtHost>,
+    #[cfg(target_os = "macos")]
+    session: Option<fuser::BackgroundSession>,
 }
 
 impl MountGuard {
@@ -98,6 +100,18 @@ impl MountGuard {
             armed: true,
             #[cfg(windows)]
             host: None,
+            #[cfg(target_os = "macos")]
+            session: None,
+        }
+    }
+
+    /// macOS-only: wrap an already-mounted FUSE-T session.
+    #[cfg(target_os = "macos")]
+    pub fn with_session(mountpoint: std::path::PathBuf, session: fuser::BackgroundSession) -> Self {
+        Self {
+            mountpoint,
+            armed: true,
+            session: Some(session),
         }
     }
 
@@ -114,6 +128,25 @@ impl MountGuard {
     #[allow(dead_code)]
     pub fn disarm(&mut self) {
         self.armed = false;
+    }
+
+    /// Full teardown: drop the in-process mount host (WinFsp / FUSE-T), then
+    /// restore the host directory. Used by the default `run_isolated` after
+    /// the child exits — at that point the mount still lives inside this
+    /// process, so a plain `unmount` cannot move the host dir back yet.
+    /// On unix this is just a best-effort unmount.
+    pub fn teardown(&mut self) -> Result<()> {
+        #[cfg(windows)]
+        {
+            self.host.take(); // WinFsp volume goes away with the host
+        }
+        #[cfg(target_os = "macos")]
+        {
+            self.session.take(); // FUSE-T session unmounts on drop
+        }
+        let result = crate::backend::unmount_best_effort(&self.mountpoint);
+        self.armed = false;
+        result
     }
 }
 

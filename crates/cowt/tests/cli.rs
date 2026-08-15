@@ -231,8 +231,12 @@ fn mutate_cmd(target: &std::path::Path) -> Vec<String> {
     #[cfg(windows)]
     {
         let d = target.display().to_string().replace('/', "\\");
+        // .NET WriteAllText keeps LF line endings (Set-Content would add CRLF).
         let script = format!(
-            "$d='{d}'; (Get-Content \"$d\\config.txt\") -replace 'beta','BETA' | Set-Content \"$d\\config.txt\"; Remove-Item \"$d\\stale.cache\"; Set-Content \"$d\\isolated.txt\" -Value 'isolated'"
+            "$d='{d}'; $c = (Get-Content \"$d\\config.txt\") -replace 'beta','BETA'; \
+             [IO.File]::WriteAllText(\"$d\\config.txt\", ($c -join \"`n\") + \"`n\"); \
+             Remove-Item \"$d\\stale.cache\"; \
+             [IO.File]::WriteAllText(\"$d\\isolated.txt\", \"isolated`n\")"
         );
         vec![
             "powershell".into(),

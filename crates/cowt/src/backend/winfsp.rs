@@ -55,16 +55,18 @@ const WHITEOUT_PREFIX: &str = ".wh.";
 pub struct WinFspBackend;
 
 /// The user context WinFsp hands back on every operation: an open file
-/// handle, or a directory path (re-listed on demand).
+/// handle (with its relative path, so delete-on-cleanup works even when the
+/// kernel does not pass a name), or a directory path (re-listed on demand).
 pub enum Handle {
-    File(std::fs::File),
+    File { f: std::fs::File, rel: PathBuf },
     Dir(PathBuf),
 }
 
 /// Paths derived from the worktree state dir (upper's parent): the moved-aside
-/// host dir (`real`) and the mountpoint for the WinFsp volume (`view`).
+/// host dir (`real`) and the (unused now) view dir.
 struct Layout {
     real: PathBuf,
+    #[allow(dead_code)]
     view: PathBuf,
 }
 
@@ -115,8 +117,10 @@ impl Backend for WinFspBackend {
         let layout = Layout::from_upper(upper);
 
         // Stale state from a hard-killed `cowt run`: the host dir sits in
-        // `real` and the target is a dangling junction. Restore it first.
-        if junction_exists(mountpoint) {
+        // `real`, and the target is either a dead WinFsp mount point or a
+        // missing directory (the driver deletes the mountpoint on process
+        // death). Restore first in both cases.
+        if is_reparse(mountpoint) || layout.real.exists() {
             if layout.real.exists() {
                 eprintln!(
                     "cowt: recovering stale mount state at {}",
@@ -125,19 +129,19 @@ impl Backend for WinFspBackend {
                 restore(mountpoint, &layout)?;
             } else {
                 bail!(
-                    "{} is a junction but no moved-aside directory was found; \
-                     refusing to touch a foreign junction",
+                    "{} is a mount point but no moved-aside directory was found; \
+                     refusing to touch a foreign mount",
                     mountpoint.display()
                 );
             }
         }
-        // Drop any leftover view dir (a dead WinFsp mount may leave a reparse
-        // point behind); harmless if the mount is still alive.
-        let _ = fs::remove_dir_all(&layout.view);
 
-        // Move the host dir aside, put a junction to the (not yet mounted)
-        // view in its place. On any later failure the dance is rolled back so
-        // the host dir never stays stranded in `real`.
+        // Move the host dir aside, then mount WinFsp directly at the original
+        // path (WinFsp creates the mountpoint directory itself — pre-creating
+        // it fails with STATUS_OBJECT_NAME_COLLISION). The host dir now lives
+        // at `real`, a plain path outside the mount, so the filesystem reads
+        // it without recursion. On any later failure the dance is rolled back.
+
         fs::rename(mountpoint, &layout.real).map_err(|e| {
             if e.kind() == io::ErrorKind::CrossesDevices {
                 anyhow::anyhow!(
@@ -156,20 +160,14 @@ impl Backend for WinFspBackend {
             }
         })?;
         let result = (|| -> Result<MountGuard> {
-            fs::create_dir_all(&layout.view)
-                .with_context(|| format!("create view dir {}", layout.view.display()))?;
-            junction::create(mountpoint, &layout.view).with_context(|| {
-                format!(
-                    "create junction {} -> {}",
-                    mountpoint.display(),
-                    layout.view.display()
-                )
-            })?;
-
             let mut vp = VolumeParams::new();
             vp.filesystem_name("cowt")
                 .post_cleanup_when_modified_only(true)
-                .unicode_on_disk(true);
+                .unicode_on_disk(true)
+                // No attribute caching: a deleted file must disappear from
+                // GetFileAttributes immediately (the default 1s timeout made
+                // e2e deletions visible only after a delay).
+                .file_info_timeout(0);
             let mut host = FileSystemHost::new_with_options(
                 FileSystemParams {
                     use_dir_info_by_name: false,
@@ -180,12 +178,14 @@ impl Backend for WinFspBackend {
                 CowFs {
                     lower: layout.real.clone(),
                     upper: upper.to_path_buf(),
-                    sd: allow_all_sd(),
                 },
             )
             .context("create WinFsp filesystem")?;
-            host.mount(layout.view.clone())
-                .with_context(|| format!("mount WinFsp volume at {}", layout.view.display()))?;
+            // WinFsp's mount manager rejects \\?\ verbatim paths; the target
+            // was canonicalized to extended form at fork time.
+            let mount_dos = dos_path(mountpoint);
+            host.mount(&mount_dos)
+                .with_context(|| format!("mount WinFsp volume at {}", mountpoint.display()))?;
             host.start().context("start WinFsp dispatcher")?;
             eprintln!(
                 "cowt: WinFsp mounted at {} (upper: {}, host dir moved to {})",
@@ -196,11 +196,9 @@ impl Backend for WinFspBackend {
             Ok(MountGuard::with_host(mountpoint.to_path_buf(), host))
         })();
         if result.is_err() {
-            // Roll back: drop the junction (if any) and move the host dir
+            // Roll back: drop the mountpoint (if any) and move the host dir
             // back into place.
-            if junction_exists(mountpoint) {
-                let _ = fs::remove_dir(mountpoint);
-            }
+            let _ = cleanup_mountpoint(mountpoint);
             let _ = restore(mountpoint, &layout);
         }
         result
@@ -208,31 +206,26 @@ impl Backend for WinFspBackend {
 
     fn unmount(&self, mountpoint: &Path) -> Result<()> {
         // Idempotent: works from a fresh process (`cowt drop --force`) or from
-        // the owning `cowt run` after its child exited. The WinFsp volume
-        // itself dies with its host process; here we only undo the junction.
-        let state = match fs::read_link(mountpoint) {
-            Ok(target) => target,
-            Err(_) => return Ok(()), // not a junction: nothing to restore
-        };
-        if state.file_name().map(|n| n != "view").unwrap_or(true) {
-            bail!(
-                "junction at {} points at {} (not a cowt view); refusing to touch it",
-                mountpoint.display(),
-                state.display()
-            );
+        // the owning `cowt run` after its child exited. The WinFsp volume dies
+        // with its host process; here we only clear the mountpoint residue and
+        // move the host dir back.
+        cleanup_mountpoint(mountpoint)?;
+        if let Some(real) = find_real_for(mountpoint) {
+            let layout = Layout {
+                real,
+                view: PathBuf::new(),
+            };
+            restore(mountpoint, &layout)?;
         }
-        let layout = Layout {
-            real: state.parent().unwrap_or(Path::new("")).join("real"),
-            view: state.clone(),
-        };
-        let _ = fs::remove_dir_all(&state);
-        fs::remove_dir(mountpoint)
-            .with_context(|| format!("remove junction at {}", mountpoint.display()))?;
-        restore(mountpoint, &layout)
+        Ok(())
     }
 
     fn is_mounted(&self, mountpoint: &Path) -> bool {
-        junction_exists(mountpoint)
+        // A WinFsp mount dies with its host process and the driver deletes
+        // the mountpoint directory — leaving the moved-aside host dir in
+        // `real` as the only trace. Treat that as still "mounted" so stale
+        // recovery (run/diff/apply/drop) restores it.
+        is_reparse(mountpoint) || find_real_for(mountpoint).is_some()
     }
 }
 
@@ -262,13 +255,62 @@ fn restore(mountpoint: &Path, layout: &Layout) -> Result<()> {
     })
 }
 
-fn junction_exists(path: &Path) -> bool {
-    fs::read_link(path).is_ok()
+/// Is `path` a reparse point (WinFsp mount point, junction or symlink)?
+/// std reports all of these as symlinks.
+fn is_reparse(path: &Path) -> bool {
+    fs::symlink_metadata(path)
+        .map(|m| m.file_type().is_symlink())
+        .unwrap_or(false)
 }
 
-/// Locate the WinFsp installer DLL via the registry (`InstallDir` value,
-/// mirroring what the winfsp crate's `system` feature does — without the
-/// feature, so Linux cross-compile builds keep working).
+/// Strip the `\\?\` verbatim prefix (WinFsp's mount manager rejects it).
+fn dos_path(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => p.to_path_buf(),
+    }
+}
+
+/// Remove a WinFsp mountpoint left behind (the driver deletes the directory
+/// when the owning process dies; if it lingers as an empty dir, drop it).
+/// Never touches a live mount (remove on a reparse point fails).
+fn cleanup_mountpoint(mountpoint: &Path) -> Result<()> {
+    if is_reparse(mountpoint) {
+        bail!(
+            "{} still has a live mount; refusing to remove it",
+            mountpoint.display()
+        );
+    }
+    if let Ok(m) = fs::symlink_metadata(mountpoint) {
+        if m.is_dir() {
+            let _ = fs::remove_dir(mountpoint);
+        }
+    }
+    Ok(())
+}
+
+/// Locate the moved-aside host dir (`<state>/<id>/real`) for a mountpoint,
+/// by matching `meta.json` targets. Used by `cowt drop --force`, where the
+/// state dir is not otherwise reachable from the mountpoint (no junction
+/// anymore — WinFsp mounts directly at the target).
+fn find_real_for(mountpoint: &Path) -> Option<PathBuf> {
+    let state = crate::state::State::open().ok()?;
+    for meta in state.list().ok()? {
+        if meta.target == mountpoint {
+            let real = state.dir(&meta.id).join("real");
+            if real.exists() {
+                return Some(real);
+            }
+        }
+    }
+    None
+}
+
+/// Locate the WinFsp installer DLL: registry `InstallDir` first (mirroring
+/// the winfsp crate's `system` feature — without the feature, so Linux
+/// cross-compile builds keep working), then well-known install locations
+/// (choco's WinFsp 2.x SxS layout may leave no registry key).
 fn installed_winfsp_dll() -> Option<PathBuf> {
     use std::os::windows::ffi::OsStringExt;
     use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
@@ -281,6 +323,7 @@ fn installed_winfsp_dll() -> Option<PathBuf> {
         "winfsp-a64.dll"
     };
 
+    let mut candidates: Vec<PathBuf> = Vec::new();
     for subkey in [
         windows::core::w!("SOFTWARE\\WOW6432Node\\WinFsp"),
         windows::core::w!("SOFTWARE\\WinFsp"),
@@ -298,11 +341,19 @@ fn installed_winfsp_dll() -> Option<PathBuf> {
                 Some(&mut size),
             )
         };
-        if status.is_err() {
-            continue;
+        if status.is_ok() {
+            let len = (size as usize) / 2;
+            candidates.push(PathBuf::from(std::ffi::OsString::from_wide(&buf[..len])));
         }
-        let len = (size as usize) / 2;
-        let dir = PathBuf::from(std::ffi::OsString::from_wide(&buf[..len]));
+    }
+    for base in [
+        "C:\\Program Files (x86)\\WinFsp",
+        "C:\\Program Files\\WinFsp",
+        "C:\\ProgramData\\WinFsp",
+    ] {
+        candidates.push(PathBuf::from(base));
+    }
+    for dir in candidates {
         let dll = dir.join("bin").join(arch);
         if dll.is_file() {
             return Some(dll);
@@ -332,7 +383,6 @@ fn load_library(path: &Path) {
 pub struct CowFs {
     lower: PathBuf,
     upper: PathBuf,
-    sd: Vec<u8>,
 }
 
 impl CowFs {
@@ -345,10 +395,25 @@ impl CowFs {
     }
 
     /// Where the merged entry lives; upper wins. The empty path is the
-    /// volume root, served from the lower (host) dir.
+    /// volume root, served from the lower (host) dir. A whiteout in upper
+    /// shadows the lower entry entirely.
     fn resolve(&self, rel: &Path) -> Option<PathBuf> {
         if rel.as_os_str().is_empty() {
             return Some(self.lower.clone());
+        }
+        let (parent, name) = (rel.parent().unwrap_or(Path::new("")), rel.file_name()?);
+        // Whiteout check (case-insensitive: WinFsp may pass an uppercase name).
+        if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
+            let needle = name.to_string_lossy().to_lowercase();
+            for e in rd.flatten() {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                if let Some(victim) = n.strip_prefix(WHITEOUT_PREFIX) {
+                    if victim.to_lowercase() == needle {
+                        return None; // deleted in the worktree
+                    }
+                }
+            }
         }
         let up = self.upper_of(rel);
         if fs::symlink_metadata(&up).is_ok() {
@@ -359,7 +424,6 @@ impl CowFs {
             return Some(low);
         }
         // Case-insensitive fallback: NTFS-like lookup by scanning the parent.
-        let (parent, name) = (rel.parent().unwrap_or(Path::new("")), rel.file_name()?);
         let lower_name = name.to_string_lossy().to_lowercase();
         for (entry, _) in self.merged_dir_entries(parent) {
             if entry.to_string_lossy().to_lowercase() == lower_name {
@@ -397,13 +461,16 @@ impl CowFs {
     }
 
     /// Merged directory entries: upper entries win over same-named lower
-    /// ones; whiteouts and other shadowed names are excluded.
+    /// ones; whiteouts and the lower entries they shadow are excluded.
     fn merged_dir_entries(&self, rel: &Path) -> Vec<(std::ffi::OsString, bool)> {
         let mut names: Vec<(std::ffi::OsString, bool, bool)> = Vec::new(); // (name, is_dir, from_upper)
+        let mut whiteouts: Vec<std::ffi::OsString> = Vec::new();
         if let Ok(rd) = fs::read_dir(self.upper_of(rel)) {
             for e in rd.flatten() {
                 let name = e.file_name();
-                if name.to_string_lossy().starts_with(WHITEOUT_PREFIX) {
+                let s = name.to_string_lossy();
+                if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
+                    whiteouts.push(std::ffi::OsString::from(victim));
                     continue;
                 }
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -415,6 +482,13 @@ impl CowFs {
                 let name = e.file_name();
                 if names.iter().any(|(n, _, _)| *n == name) {
                     continue; // shadowed by an upper entry
+                }
+                // Case-insensitive shadowing: WinFsp may normalize the
+                // whiteout victim name to uppercase.
+                if whiteouts.iter().any(|w| {
+                    w.to_string_lossy().to_lowercase() == name.to_string_lossy().to_lowercase()
+                }) {
+                    continue;
                 }
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
                 names.push((name, is_dir, false));
@@ -438,11 +512,32 @@ impl CowFs {
         if fs::symlink_metadata(self.lower_of(rel)).is_err() {
             return Ok(()); // nothing left to hide
         }
-        let name = rel
+        // The whiteout must carry the *actual* on-disk name: WinFsp passes
+        // the name normalized to uppercase, and Windows' case-insensitive
+        // filesystem would happily resolve the uppercase path and keep its
+        // spelling. Enumerate the parent to find the real name.
+        let needle = rel
             .file_name()
-            .and_then(|n| n.to_str())
-            .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "no file name"))?;
-        let wh = up.with_file_name(format!("{WHITEOUT_PREFIX}{name}"));
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let actual = {
+            let parent = rel.parent().unwrap_or(Path::new(""));
+            let find = |dir: &Path| {
+                fs::read_dir(dir).ok().and_then(|rd| {
+                    rd.flatten()
+                        .find(|e| e.file_name().to_string_lossy().to_lowercase() == needle)
+                })
+            };
+            find(&self.upper_of(parent))
+                .or_else(|| find(&self.lower_of(parent)))
+                .map(|e| e.file_name().to_string_lossy().into_owned())
+                .unwrap_or_else(|| {
+                    rel.file_name()
+                        .map(|n| n.to_string_lossy().into_owned())
+                        .unwrap_or_default()
+                })
+        };
+        let wh = up.with_file_name(format!("{WHITEOUT_PREFIX}{actual}"));
         if let Some(p) = wh.parent() {
             fs::create_dir_all(p)?;
         }
@@ -490,7 +585,7 @@ impl FileSystemContext for CowFs {
     fn get_security_by_name(
         &self,
         file_name: &U16CStr,
-        security_descriptor: Option<&mut [c_void]>,
+        _security_descriptor: Option<&mut [c_void]>,
         _reparse_point_resolver: impl FnOnce(&U16CStr) -> Option<FileSecurity>,
     ) -> FspResult<FileSecurity> {
         let rel = rel_of(file_name);
@@ -504,15 +599,13 @@ impl FileSystemContext for CowFs {
         } else {
             FILE_ATTRIBUTE_NORMAL
         };
-        if let Some(buf) = security_descriptor {
-            let n = self.sd.len().min(buf.len());
-            unsafe {
-                std::ptr::copy_nonoverlapping(self.sd.as_ptr(), buf.as_mut_ptr().cast::<u8>(), n);
-            }
-        }
+        // This filesystem does not implement ACLs: report a zero-size
+        // descriptor (WinFsp grants default access in that case). Returning a
+        // real descriptor would require a self-contained SD (DACL inside the
+        // buffer); a dangling pointer here makes the kernel refuse the path.
         Ok(FileSecurity {
             reparse: false,
-            sz_security_descriptor: self.sd.len() as u64,
+            sz_security_descriptor: 0,
             attributes: attrs,
         })
     }
@@ -545,7 +638,10 @@ impl FileSystemContext for CowFs {
             .write(wants_write)
             .open(&path)?;
         CowFs::fill_file_info(&f.metadata()?, FILE_ATTRIBUTE_NORMAL, file_info.as_mut());
-        Ok(Handle::File(f))
+        Ok(Handle::File {
+            f,
+            rel: rel.clone(),
+        })
     }
 
     fn close(&self, context: Self::FileContext) {
@@ -588,15 +684,25 @@ impl FileSystemContext for CowFs {
         let meta = f.metadata()?;
         CowFs::fill_file_info(&meta, FILE_ATTRIBUTE_NORMAL, file_info.as_mut());
         let _ = granted_access;
-        Ok(Handle::File(f))
+        Ok(Handle::File {
+            f,
+            rel: rel.clone(),
+        })
     }
 
     fn cleanup(&self, context: &Self::FileContext, file_name: Option<&U16CStr>, flags: u32) {
         if flags & FSP_CLEANUP_DELETE == 0 {
             return;
         }
-        let Some(name) = file_name else { return };
-        let rel = rel_of(name);
+        // The kernel may not pass a name for delete-on-close; the open handle
+        // carries the path as a fallback.
+        let rel = match file_name {
+            Some(name) => rel_of(name),
+            None => match context {
+                Handle::File { rel, .. } => rel.clone(),
+                Handle::Dir(rel) => rel.clone(),
+            },
+        };
         if let Err(e) = self.delete_merged(&rel) {
             eprintln!("cowt: warning: delete of {} failed: {e}", rel.display());
         }
@@ -608,7 +714,7 @@ impl FileSystemContext for CowFs {
         context: Option<&Self::FileContext>,
         _file_info: &mut FileInfo,
     ) -> FspResult<()> {
-        if let Some(Handle::File(f)) = context {
+        if let Some(Handle::File { f, .. }) = context {
             f.sync_all()?;
         }
         Ok(())
@@ -620,7 +726,7 @@ impl FileSystemContext for CowFs {
         file_info: &mut FileInfo,
     ) -> FspResult<()> {
         match context {
-            Handle::File(f) => {
+            Handle::File { f, .. } => {
                 let meta = f.metadata()?;
                 CowFs::fill_file_info(&meta, FILE_ATTRIBUTE_NORMAL, file_info);
             }
@@ -642,7 +748,7 @@ impl FileSystemContext for CowFs {
         _extra_buffer: Option<&[u8]>,
         file_info: &mut FileInfo,
     ) -> FspResult<()> {
-        if let Handle::File(f) = context {
+        if let Handle::File { f, .. } = context {
             f.set_len(0)?;
             let meta = f.metadata()?;
             CowFs::fill_file_info(&meta, FILE_ATTRIBUTE_NORMAL, file_info);
@@ -747,9 +853,10 @@ impl FileSystemContext for CowFs {
     fn set_delete(
         &self,
         _context: &Self::FileContext,
-        _file_name: &U16CStr,
-        _delete_file: bool,
+        file_name: &U16CStr,
+        delete_file: bool,
     ) -> FspResult<()> {
+        let _ = (file_name, delete_file);
         // The actual deletion happens in `cleanup` (WinFsp contract).
         Ok(())
     }
@@ -761,7 +868,7 @@ impl FileSystemContext for CowFs {
         _set_allocation_size: bool,
         file_info: &mut FileInfo,
     ) -> FspResult<()> {
-        if let Handle::File(f) = context {
+        if let Handle::File { f, .. } = context {
             f.set_len(new_size)?;
             let meta = f.metadata()?;
             CowFs::fill_file_info(&meta, FILE_ATTRIBUTE_NORMAL, file_info);
@@ -770,7 +877,7 @@ impl FileSystemContext for CowFs {
     }
 
     fn read(&self, context: &Self::FileContext, buffer: &mut [u8], offset: u64) -> FspResult<u32> {
-        let Handle::File(f) = context else {
+        let Handle::File { f, .. } = context else {
             return Err(FspError::IO(ErrorKind::InvalidInput));
         };
         let n = f.seek_read(buffer, offset)?;
@@ -786,7 +893,7 @@ impl FileSystemContext for CowFs {
         _constrained_io: bool,
         file_info: &mut FileInfo,
     ) -> FspResult<u32> {
-        let Handle::File(f) = context else {
+        let Handle::File { f, .. } = context else {
             return Err(FspError::IO(ErrorKind::InvalidInput));
         };
         let off = if write_to_eof {
@@ -825,77 +932,5 @@ impl FileSystemContext for CowFs {
         out_volume_info.free_size = if ok { free } else { 0 };
         out_volume_info.set_volume_label("cowt");
         Ok(())
-    }
-}
-
-/// A security descriptor granting Everyone full access — the WinFsp
-/// passthrough convention. Built once per process.
-fn allow_all_sd() -> Vec<u8> {
-    use std::mem::size_of;
-    use windows::Win32::Security::{
-        AddAccessAllowedAceEx, CreateWellKnownSid, GetSecurityDescriptorLength, InitializeAcl,
-        InitializeSecurityDescriptor, SetSecurityDescriptorDacl, WinWorldSid, ACL, ACL_REVISION,
-        CONTAINER_INHERIT_ACE, OBJECT_INHERIT_ACE, PSECURITY_DESCRIPTOR, PSID, SECURITY_DESCRIPTOR,
-        SID,
-    };
-
-    // GENERIC_ALL (windows-rs does not export it in Win32::Security).
-    const GENERIC_ALL: u32 = 0x1000_0000;
-    // SECURITY_DESCRIPTOR_REVISION.
-    const SD_REVISION: u32 = 1;
-
-    #[repr(C)]
-    struct AclWithBuf {
-        acl: ACL,
-        buf: [u8; 1024],
-    }
-
-    unsafe {
-        let mut sd = SECURITY_DESCRIPTOR::default();
-        InitializeSecurityDescriptor(
-            PSECURITY_DESCRIPTOR((&mut sd as *mut SECURITY_DESCRIPTOR).cast()),
-            SD_REVISION,
-        )
-        .expect("InitializeSecurityDescriptor");
-        let mut sid = SID::default();
-        let mut sid_len = size_of::<SID>() as u32;
-        CreateWellKnownSid(
-            WinWorldSid,
-            None,
-            Some(PSID((&mut sid as *mut SID).cast())),
-            &mut sid_len,
-        )
-        .expect("CreateWellKnownSid");
-        let mut acl = AclWithBuf {
-            acl: ACL::default(),
-            buf: [0; 1024],
-        };
-        InitializeAcl(&mut acl.acl, size_of::<AclWithBuf>() as u32, ACL_REVISION)
-            .expect("InitializeAcl");
-        AddAccessAllowedAceEx(
-            &mut acl.acl,
-            ACL_REVISION,
-            OBJECT_INHERIT_ACE | CONTAINER_INHERIT_ACE,
-            GENERIC_ALL,
-            PSID((&mut sid as *mut SID).cast()),
-        )
-        .expect("AddAccessAllowedAceEx");
-        SetSecurityDescriptorDacl(
-            PSECURITY_DESCRIPTOR((&mut sd as *mut SECURITY_DESCRIPTOR).cast()),
-            true,
-            Some(&acl.acl as *const ACL),
-            false,
-        )
-        .expect("SetSecurityDescriptorDacl");
-        let len = GetSecurityDescriptorLength(PSECURITY_DESCRIPTOR(
-            (&sd as *const SECURITY_DESCRIPTOR).cast_mut().cast(),
-        )) as usize;
-        let mut out = vec![0u8; len];
-        std::ptr::copy_nonoverlapping(
-            (&sd as *const SECURITY_DESCRIPTOR).cast::<u8>(),
-            out.as_mut_ptr(),
-            len,
-        );
-        out
     }
 }

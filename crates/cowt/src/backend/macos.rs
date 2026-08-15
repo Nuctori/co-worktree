@@ -1,98 +1,733 @@
-//! macOS backend: kernel union mount (`mount -t union`).
+//! macOS backend: a userspace FUSE filesystem with copy-on-write, hosted on
+//! **FUSE-T** (a kext-less libfuse-compatible runtime that serves FUSE over
+//! the built-in NFS client — no kernel extension, no approval prompts, which
+//! is what makes it the only viable option on CI runners and Apple Silicon).
 //!
-//! macOS ships a BSD-style union mount in the kernel — no third-party driver
-//! needed, which is what makes it viable on CI (macFUSE kexts cannot be
-//! approved headlessly on GitHub Actions runners). Writes trigger a kernel
-//! copy-up into the upper directory; deletions produce `.wh.<name>` whiteout
-//! files, which cowt-core already parses.
+//! Apple removed the kernel union mount (`/Library/Filesystems/union.fs`)
+//! from current macOS images entirely — `mount -t union` fails with
+//! ENOENT/ENOTSUP — so this backend implements the same semantics as the
+//! Windows one, in userspace:
 //!
-//! Like the Linux `kernel-overlay` mode this requires root (`mount(2)` is
-//! privileged); `cowt doctor` probes an actual mount to report availability.
+//! ```text
+//! target (symlink) ──▶ state/<id>/view   (FUSE-T mount)
+//!                        ├── lower ─▶ state/<id>/real   (host dir, moved aside)
+//!                        └── upper ─▶ state/<id>/upper  (isolated writes)
+//! ```
+//!
+//! While a worktree runs, the host directory is moved aside to `real` and
+//! the original path becomes a symlink to the mounted view. Reads pass
+//! through to `real`; writes copy files up into `upper` first; deletions of
+//! lower-only files leave `.wh.<name>` whiteouts. Mounting needs root
+//! (`mount` is privileged), like the old union backend.
+//!
+//! FUSE-T install: `brew install macos-fuse-t/homebrew-cask/fuse-t` and make
+//! the libfuse pkg-config file visible (see scripts/macos/install-fuse-t.sh).
 
-use std::path::Path;
-use std::process::Command;
-use std::sync::OnceLock;
+use std::collections::HashMap;
+use std::ffi::OsStr;
+use std::fs;
+use std::io;
+use std::os::unix::fs::FileExt;
+use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Mutex;
+use std::time::{Duration, SystemTime};
 
 use anyhow::{bail, Context, Result};
+use fuser::{
+    BackgroundSession, FileAttr, FileType, Filesystem, KernelConfig, MountOption, ReplyAttr,
+    ReplyCreate, ReplyData, ReplyDirectory, ReplyEmpty, ReplyEntry, ReplyOpen, ReplyStatfs,
+    ReplyWrite, Request, Session,
+};
 
 use super::{Backend, MountGuard};
 
-pub struct Union;
+pub struct FuseT;
 
-/// True once `mount -t union` has been observed to work on this host.
-static AVAILABLE: OnceLock<bool> = OnceLock::new();
-
-fn available() -> bool {
-    *AVAILABLE.get_or_init(probe)
+/// The copy-on-write filesystem. `lower` = the moved-aside host dir,
+/// `upper` = the isolated write layer. Inodes are assigned by a path table
+/// (the FUSE protocol addresses files by inode, not by path).
+pub struct CowFs {
+    lower: PathBuf,
+    upper: PathBuf,
+    inos: Mutex<InoTable>,
+    fhs: Mutex<HashMap<u64, Handle>>,
+    next_fh: AtomicU64,
 }
 
-/// Probe: mount a union over a scratch dir, then unmount it.
+const ROOT_INO: u64 = 1;
+const WHITEOUT_PREFIX: &str = ".wh.";
+
+struct InoTable {
+    next: u64,
+    by_ino: HashMap<u64, PathBuf>,
+    by_path: HashMap<PathBuf, u64>,
+}
+
+impl InoTable {
+    fn new() -> Self {
+        let mut by_ino = HashMap::new();
+        let mut by_path = HashMap::new();
+        by_ino.insert(ROOT_INO, PathBuf::new());
+        by_path.insert(PathBuf::new(), ROOT_INO);
+        InoTable {
+            next: ROOT_INO + 1,
+            by_ino,
+            by_path,
+        }
+    }
+
+    fn ino_of(&self, rel: &Path) -> Option<u64> {
+        self.by_path.get(rel).copied()
+    }
+
+    fn path_of(&self, ino: u64) -> Option<PathBuf> {
+        self.by_ino.get(&ino).cloned()
+    }
+
+    fn alloc(&mut self, rel: PathBuf) -> u64 {
+        if let Some(ino) = self.by_path.get(&rel) {
+            return *ino;
+        }
+        let ino = self.next;
+        self.next += 1;
+        self.by_ino.insert(ino, rel.clone());
+        self.by_path.insert(rel, ino);
+        ino
+    }
+}
+
+enum Handle {
+    File(std::fs::File),
+    Dir,
+}
+
+fn ttl() -> Duration {
+    Duration::from_secs(1)
+}
+
+impl CowFs {
+    fn upper_of(&self, rel: &Path) -> PathBuf {
+        self.upper.join(rel)
+    }
+
+    fn lower_of(&self, rel: &Path) -> PathBuf {
+        self.lower.join(rel)
+    }
+
+    /// Where the merged entry lives; upper wins. The empty path is the root,
+    /// served from the lower (host) dir.
+    fn resolve(&self, rel: &Path) -> Option<PathBuf> {
+        if rel.as_os_str().is_empty() {
+            return Some(self.lower.clone());
+        }
+        let up = self.upper_of(rel);
+        if fs::symlink_metadata(&up).is_ok() {
+            return Some(up);
+        }
+        let low = self.lower_of(rel);
+        if fs::symlink_metadata(&low).is_ok() {
+            return Some(low);
+        }
+        None
+    }
+
+    /// Merged directory entries: upper wins; whiteouts are excluded.
+    fn merged_dir_entries(&self, rel: &Path) -> Vec<std::ffi::OsString> {
+        let mut names: Vec<std::ffi::OsString> = Vec::new();
+        if let Ok(rd) = fs::read_dir(self.upper_of(rel)) {
+            for e in rd.flatten() {
+                let name = e.file_name();
+                if name.to_string_lossy().starts_with(WHITEOUT_PREFIX) {
+                    continue;
+                }
+                names.push(name);
+            }
+        }
+        if let Ok(rd) = fs::read_dir(self.lower_of(rel)) {
+            for e in rd.flatten() {
+                let name = e.file_name();
+                if names.iter().any(|n| *n == name) {
+                    continue;
+                }
+                names.push(name);
+            }
+        }
+        names.sort();
+        names
+    }
+
+    /// Copy a lower-only file into upper (parents included).
+    fn copy_up(&self, rel: &Path) -> io::Result<PathBuf> {
+        let src = self.lower_of(rel);
+        let dst = self.upper_of(rel);
+        if let Some(p) = dst.parent() {
+            fs::create_dir_all(p)?;
+        }
+        if fs::symlink_metadata(&dst).is_err() {
+            fs::copy(&src, &dst)?;
+        }
+        Ok(dst)
+    }
+
+    /// Recursively copy a lower-only file or directory tree into upper.
+    fn copy_up_tree(&self, rel: &Path) -> io::Result<()> {
+        let meta = fs::symlink_metadata(self.lower_of(rel))?;
+        if !meta.is_dir() {
+            self.copy_up(rel)?;
+            return Ok(());
+        }
+        for name in self.merged_dir_entries(rel) {
+            self.copy_up_tree(&rel.join(name))?;
+        }
+        Ok(())
+    }
+
+    /// Delete a merged path: remove the upper copy (if any), then whiteout
+    /// the lower one (if any) so it cannot reappear.
+    fn delete_merged(&self, rel: &Path) -> io::Result<()> {
+        let up = self.upper_of(rel);
+        if let Ok(m) = fs::symlink_metadata(&up) {
+            if m.is_dir() {
+                fs::remove_dir_all(&up)?;
+            } else {
+                fs::remove_file(&up)?;
+            }
+        }
+        if fs::symlink_metadata(self.lower_of(rel)).is_err() {
+            return Ok(()); // nothing left to hide
+        }
+        let name = rel
+            .file_name()
+            .and_then(|n| n.to_str())
+            .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "no file name"))?;
+        let wh = up.with_file_name(format!("{WHITEOUT_PREFIX}{name}"));
+        if let Some(p) = wh.parent() {
+            fs::create_dir_all(p)?;
+        }
+        fs::write(&wh, b"")?;
+        Ok(())
+    }
+
+    /// FUSE attributes for a merged path.
+    fn attr_of(&self, rel: &Path) -> io::Result<FileAttr> {
+        let path = self
+            .resolve(rel)
+            .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "not found"))?;
+        let meta = fs::symlink_metadata(&path)?;
+        let ino = self.inos.lock().unwrap().alloc(rel.to_path_buf());
+        let kind = if meta.is_dir() {
+            FileType::Directory
+        } else if meta.file_type().is_symlink() {
+            FileType::Symlink
+        } else {
+            FileType::RegularFile
+        };
+        let perm = if meta.is_dir() { 0o755 } else { 0o644 };
+        Ok(FileAttr {
+            ino,
+            size: meta.len(),
+            blocks: meta.len().div_ceil(512),
+            atime: meta.accessed().unwrap_or(SystemTime::UNIX_EPOCH),
+            mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            ctime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            crtime: SystemTime::UNIX_EPOCH,
+            kind,
+            perm,
+            nlink: 1,
+            uid: unsafe { libc::geteuid() },
+            gid: unsafe { libc::getegid() },
+            rdev: 0,
+            blksize: 4096,
+            flags: 0,
+        })
+    }
+}
+
+impl Filesystem for CowFs {
+    fn init(&mut self, _req: &Request<'_>, _config: &mut KernelConfig) -> Result<(), i32> {
+        Ok(())
+    }
+
+    fn lookup(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEntry) {
+        let rel = match self
+            .inos
+            .lock()
+            .unwrap()
+            .path_of(parent)
+            .map(|p| p.join(name))
+        {
+            Some(r) => r,
+            None => return reply.error(libc::ENOENT),
+        };
+        match self.attr_of(&rel) {
+            Ok(attr) => reply.entry(&ttl(), &attr, 0),
+            Err(_) => reply.error(libc::ENOENT),
+        }
+    }
+
+    fn getattr(&mut self, _req: &Request<'_>, ino: u64, _fh: Option<u64>, reply: ReplyAttr) {
+        let rel = match self.inos.lock().unwrap().path_of(ino) {
+            Some(r) => r,
+            None => return reply.error(libc::ENOENT),
+        };
+        match self.attr_of(&rel) {
+            Ok(attr) => reply.attr(&ttl(), &attr),
+            Err(_) => reply.error(libc::ENOENT),
+        }
+    }
+
+    fn setattr(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _mode: Option<u32>,
+        _uid: Option<u32>,
+        _gid: Option<u32>,
+        size: Option<u64>,
+        _atime: Option<SystemTime>,
+        _mtime: Option<SystemTime>,
+        _ctime: Option<SystemTime>,
+        fh: Option<u64>,
+        _crtime: Option<SystemTime>,
+        _chgtime: Option<SystemTime>,
+        _bkuptime: Option<SystemTime>,
+        _flags: Option<u32>,
+        reply: ReplyAttr,
+    ) {
+        // Truncation is the only attribute cowt needs.
+        if let Some(size) = size {
+            let truncated = if let Some(fh) = fh {
+                self.fhs.lock().unwrap().get(&fh).and_then(|h| match h {
+                    Handle::File(f) => Some(f.set_len(size)),
+                    Handle::Dir => None,
+                })
+            } else {
+                // Inode-based truncate without a handle: ensure the file is
+                // in upper first (never touch the host dir).
+                let rel = self.inos.lock().unwrap().path_of(ino);
+                rel.map(|rel| {
+                    let up = self.upper_of(&rel);
+                    if fs::symlink_metadata(&up).is_err() {
+                        let _ = self.copy_up(&rel);
+                    }
+                    fs::OpenOptions::new().write(true).open(&up)
+                })
+                .and_then(|r| r.map(|f| f.set_len(size)))
+            };
+            if let Err(e) = truncated {
+                return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+            }
+        }
+        let rel = match self.inos.lock().unwrap().path_of(ino) {
+            Some(r) => r,
+            None => return reply.error(libc::ENOENT),
+        };
+        match self.attr_of(&rel) {
+            Ok(attr) => reply.attr(&ttl(), &attr),
+            Err(_) => reply.error(libc::ENOENT),
+        }
+    }
+
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
+    ) {
+        let Some(rel) = self
+            .inos
+            .lock()
+            .unwrap()
+            .path_of(parent)
+            .map(|p| p.join(name))
+        else {
+            return reply.error(libc::ENOENT);
+        };
+        if let Err(e) = fs::create_dir_all(self.upper_of(&rel)) {
+            return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+        }
+        match self.attr_of(&rel) {
+            Ok(attr) => reply.entry(&ttl(), &attr, 0),
+            Err(_) => reply.error(libc::EIO),
+        }
+    }
+
+    fn unlink(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        let Some(rel) = self
+            .inos
+            .lock()
+            .unwrap()
+            .path_of(parent)
+            .map(|p| p.join(name))
+        else {
+            return reply.error(libc::ENOENT);
+        };
+        match self.delete_merged(&rel) {
+            Ok(()) => reply.ok(),
+            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
+        }
+    }
+
+    fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
+        self.unlink(_req, parent, name, reply)
+    }
+
+    fn rename(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        newparent: u64,
+        newname: &OsStr,
+        _flags: u32,
+        reply: ReplyEmpty,
+    ) {
+        let (Some(src), Some(dst)) = (
+            self.inos
+                .lock()
+                .unwrap()
+                .path_of(parent)
+                .map(|p| p.join(name)),
+            self.inos
+                .lock()
+                .unwrap()
+                .path_of(newparent)
+                .map(|p| p.join(newname)),
+        ) else {
+            return reply.error(libc::ENOENT);
+        };
+        let lower_has = fs::symlink_metadata(self.lower_of(&src)).is_ok();
+        let src_up = self.upper_of(&src);
+        if lower_has && fs::symlink_metadata(&src_up).is_err() {
+            if let Err(e) = self.copy_up_tree(&src) {
+                return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+            }
+        }
+        if fs::symlink_metadata(&src_up).is_err() {
+            return reply.error(libc::ENOENT);
+        }
+        let dst_up = self.upper_of(&dst);
+        if let Some(p) = dst_up.parent() {
+            if let Err(e) = fs::create_dir_all(p) {
+                return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+            }
+        }
+        let _ = self.delete_merged(&dst); // replace-if-exists semantics
+        if let Err(e) = fs::rename(&src_up, &dst_up) {
+            return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+        }
+        if lower_has {
+            let name = match src.file_name().and_then(|n| n.to_str()) {
+                Some(n) => n,
+                None => return reply.error(libc::EINVAL),
+            };
+            if let Err(e) = fs::write(
+                src_up.with_file_name(format!("{WHITEOUT_PREFIX}{name}")),
+                b"",
+            ) {
+                return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+            }
+        }
+        reply.ok()
+    }
+
+    fn open(&mut self, _req: &Request<'_>, ino: u64, flags: i32, reply: ReplyOpen) {
+        let Some(rel) = self.inos.lock().unwrap().path_of(ino) else {
+            return reply.error(libc::ENOENT);
+        };
+        let wants_write =
+            flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_TRUNC | libc::O_APPEND) != 0;
+        let path = match self.resolve(&rel) {
+            Some(p) => p,
+            None => return reply.error(libc::ENOENT),
+        };
+        let path = if wants_write && path.starts_with(&self.lower) {
+            match self.copy_up(&rel) {
+                Ok(p) => p,
+                Err(e) => return reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
+            }
+        } else {
+            path
+        };
+        let mut opts = fs::OpenOptions::new();
+        opts.read(true).write(wants_write);
+        let f = match opts.open(&path) {
+            Ok(f) => f,
+            Err(e) => return reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
+        };
+        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 2;
+        self.fhs.lock().unwrap().insert(fh, Handle::File(f));
+        reply.opened(fh, 0);
+    }
+
+    fn read(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        size: u32,
+        _flags: i32,
+        reply: ReplyData,
+    ) {
+        let Some(Handle::File(f)) = self.fhs.lock().unwrap().get(&fh).map(|h| h) else {
+            return reply.error(libc::EBADF);
+        };
+        let mut buf = vec![0u8; size as usize];
+        match f.read_at(&mut buf, offset.max(0) as u64) {
+            Ok(n) => {
+                buf.truncate(n);
+                reply.data(&buf);
+            }
+            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
+        }
+    }
+
+    fn write(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        offset: i64,
+        data: &[u8],
+        _flags: i32,
+        reply: ReplyWrite,
+    ) {
+        let Some(Handle::File(f)) = self.fhs.lock().unwrap().get(&fh).map(|h| h) else {
+            return reply.error(libc::EBADF);
+        };
+        match f.write_at(data, offset.max(0) as u64) {
+            Ok(n) => reply.written(n as u32),
+            Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
+        }
+    }
+
+    fn flush(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        _fh: u64,
+        _lock_owner: u64,
+        reply: ReplyEmpty,
+    ) {
+        reply.ok();
+    }
+
+    fn release(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _flags: i32,
+        _lock_owner: u64,
+        _flush: bool,
+        reply: ReplyEmpty,
+    ) {
+        self.fhs.lock().unwrap().remove(&fh);
+        reply.ok();
+    }
+
+    fn fsync(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _datasync: bool,
+        reply: ReplyEmpty,
+    ) {
+        let synced = self.fhs.lock().unwrap().get(&fh).and_then(|h| match h {
+            Handle::File(f) => Some(f.sync_all()),
+            Handle::Dir => None,
+        });
+        match synced {
+            Some(Ok(())) => reply.ok(),
+            Some(Err(e)) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
+            None => reply.ok(),
+        }
+    }
+
+    fn opendir(&mut self, _req: &Request<'_>, _ino: u64, _flags: i32, reply: ReplyOpen) {
+        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 2;
+        self.fhs.lock().unwrap().insert(fh, Handle::Dir);
+        reply.opened(fh, 0);
+    }
+
+    fn readdir(
+        &mut self,
+        _req: &Request<'_>,
+        ino: u64,
+        _fh: u64,
+        offset: i64,
+        mut reply: ReplyDirectory,
+    ) {
+        let Some(rel) = self.inos.lock().unwrap().path_of(ino) else {
+            return reply.error(libc::ENOENT);
+        };
+        let entries = self.merged_dir_entries(&rel);
+        let mut table = self.inos.lock().unwrap();
+        for (i, name) in entries.iter().enumerate() {
+            let idx = i as i64 + 1;
+            if idx <= offset {
+                continue;
+            }
+            let child = rel.join(name);
+            let kind = fs::symlink_metadata(self.resolve(&child).unwrap_or_default())
+                .map(|m| {
+                    if m.is_dir() {
+                        FileType::Directory
+                    } else {
+                        FileType::RegularFile
+                    }
+                })
+                .unwrap_or(FileType::RegularFile);
+            let ino = table.alloc(child);
+            if reply.add(ino, idx, kind, name) {
+                break;
+            }
+        }
+        reply.ok();
+    }
+
+    fn releasedir(
+        &mut self,
+        _req: &Request<'_>,
+        _ino: u64,
+        fh: u64,
+        _flags: i32,
+        reply: ReplyEmpty,
+    ) {
+        self.fhs.lock().unwrap().remove(&fh);
+        reply.ok();
+    }
+
+    fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
+        let mut vfs = std::mem::MaybeUninit::<libc::statvfs>::uninit();
+        let ok = unsafe { libc::statvfs(self.upper.as_ptr(), vfs.as_mut_ptr()) == 0 };
+        if !ok {
+            reply.statfs(0, 0, 0, 0, 0, 512, 255, 0, 0);
+            return;
+        }
+        let v = unsafe { vfs.assume_init() };
+        reply.statfs(
+            v.f_blocks,
+            v.f_bfree,
+            v.f_bavail,
+            v.f_files,
+            v.f_ffree,
+            v.f_frsize as u32,
+            v.f_namemax as u32,
+            v.f_frsize as u32,
+            0,
+        );
+    }
+
+    fn access(&mut self, _req: &Request<'_>, _ino: u64, _mask: i32, reply: ReplyEmpty) {
+        reply.ok();
+    }
+
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
+    ) {
+        let Some(rel) = self
+            .inos
+            .lock()
+            .unwrap()
+            .path_of(parent)
+            .map(|p| p.join(name))
+        else {
+            return reply.error(libc::ENOENT);
+        };
+        let dst = self.upper_of(&rel);
+        if let Some(p) = dst.parent() {
+            if let Err(e) = fs::create_dir_all(p) {
+                return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+            }
+        }
+        let f = match fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .create(true)
+            .truncate(flags & libc::O_TRUNC != 0)
+            .open(&dst)
+        {
+            Ok(f) => f,
+            Err(e) => return reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
+        };
+        let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 2;
+        self.fhs.lock().unwrap().insert(fh, Handle::File(f));
+        match self.attr_of(&rel) {
+            Ok(attr) => reply.created(&ttl(), &attr, fh, 0),
+            Err(_) => reply.error(libc::EIO),
+        }
+    }
+}
+
+// ------------------------------------------------------------ backend glue ==
+
+/// Probe: mount a throwaway filesystem, then tear it down.
 fn probe() -> bool {
-    let probe = std::env::temp_dir().join(format!("cowt-union-probe-{}", std::process::id()));
-    let (upper, mountpoint) = (probe.join("upper"), probe.join("mount"));
-    let dirs_ok = [&upper, &mountpoint]
+    let probe = std::env::temp_dir().join(format!("cowt-fuse-probe-{}", std::process::id()));
+    let (lower, upper, mountpoint) = (probe.join("l"), probe.join("u"), probe.join("m"));
+    let dirs_ok = [&lower, &upper, &mountpoint]
         .iter()
         .all(|d| std::fs::create_dir_all(d).is_ok());
     if !dirs_ok {
         return false;
     }
-    let ok = mount_union(&upper, &mountpoint).is_ok();
-    if ok {
-        // Unmount the probe immediately; the entry point stays mounted until
-        // the process exits, which is fine for a throwaway temp dir, but a
-        // clean teardown keeps `mount` output readable.
-        let _ = Command::new("umount").arg(&mountpoint).status();
-    }
+    let ok = mount_cow(&lower, &upper, &mountpoint, "cowt-probe").is_ok();
     let _ = std::fs::remove_dir_all(&probe);
     ok
 }
 
-/// Human-readable reason when the union probe fails.
-fn probe_reason() -> String {
-    // Current macOS images (macos-14 GH runners and macOS 15+) ship no
-    // `/Library/Filesystems/union.fs` helper at all — `mount -t union` fails
-    // with exec ENOENT. The kernel union vfs is still present; cowt ships a
-    // replacement helper (see scripts/macos/install-union-helper.sh).
-    let helper = Path::new("/Library/Filesystems/union.fs/Contents/Resources/mount_union");
-    if !helper.exists() {
-        return format!(
-            "this macOS no longer ships the union mount helper ({} is missing); \
-             install cowt's replacement with: sudo bash scripts/macos/install-union-helper.sh",
-            helper.display()
-        );
-    }
-    "union mount failed (root required — run as root or via sudo)".into()
+/// Mount the CoW filesystem at `mountpoint` and return a background session.
+fn mount_cow(
+    lower: &Path,
+    upper: &Path,
+    mountpoint: &Path,
+    fsname: &str,
+) -> Result<BackgroundSession> {
+    let fs = CowFs {
+        lower: lower.to_path_buf(),
+        upper: upper.to_path_buf(),
+        inos: Mutex::new(InoTable::new()),
+        fhs: Mutex::new(HashMap::new()),
+        next_fh: AtomicU64::new(0),
+    };
+    let options = vec![
+        MountOption::FSName(fsname.to_string()),
+        MountOption::AutoUnmount,
+        MountOption::DefaultPermissions,
+    ];
+    let session = Session::new(fs, mountpoint, &options)
+        .with_context(|| format!("mount FUSE-T filesystem at {}", mountpoint.display()))?;
+    BackgroundSession::new(session).context("start FUSE-T session")
 }
 
-/// `mount -t union -o nobrowse <upper> <mountpoint>`: the mountpoint's own
-/// content becomes the lower layer (classic BSD union semantics).
-fn mount_union(upper: &Path, mountpoint: &Path) -> Result<()> {
-    let status = Command::new("mount")
-        .args(["-t", "union", "-o", "nobrowse"])
-        .arg(upper)
-        .arg(mountpoint)
-        .status()
-        .context("spawn mount")?;
-    if !status.success() {
-        bail!(
-            "kernel union mount failed at {} (root required; macOS union mounts \
-             are unsupported on this host if this persists)",
-            mountpoint.display()
-        );
-    }
-    Ok(())
-}
-
-impl Backend for Union {
+impl Backend for FuseT {
     fn name(&self) -> &'static str {
-        "kernel-union"
+        "fuse-t"
     }
 
     fn available(&self) -> Result<()> {
-        if available() {
+        if probe() {
             Ok(())
         } else {
-            bail!("kernel union mount unavailable: {}", probe_reason())
+            bail!(
+                "FUSE-T is not usable: install it with \
+                 `brew install macos-fuse-t/homebrew-cask/fuse-t` (see \
+                 scripts/macos/install-fuse-t.sh); mounting needs root"
+            )
         }
     }
 
@@ -104,39 +739,140 @@ impl Backend for Union {
         mountpoint: &Path,
     ) -> Result<MountGuard> {
         self.available()?;
-        mount_union(upper, mountpoint)
-            .with_context(|| format!("mount union at {}", mountpoint.display()))?;
-        eprintln!(
-            "cowt: kernel union mounted at {} (upper: {})",
-            mountpoint.display(),
-            upper.display()
-        );
-        Ok(MountGuard::new(mountpoint.to_path_buf()))
+        let layout = Layout::from_upper(upper);
+
+        // Stale state from a hard-killed `cowt run`: restore it first.
+        if fs::symlink_metadata(mountpoint)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            if layout.real.exists() {
+                eprintln!(
+                    "cowt: recovering stale mount state at {}",
+                    mountpoint.display()
+                );
+                restore(mountpoint, &layout)?;
+            } else {
+                bail!(
+                    "{} is a symlink but no moved-aside directory was found; \
+                     refusing to touch a foreign symlink",
+                    mountpoint.display()
+                );
+            }
+        }
+        let _ = fs::remove_dir_all(&layout.view);
+
+        // Move the host dir aside, point the original path at the view.
+        fs::rename(mountpoint, &layout.real).with_context(|| {
+            format!(
+                "move {} aside to {}",
+                mountpoint.display(),
+                layout.real.display()
+            )
+        })?;
+        let result = (|| -> Result<MountGuard> {
+            fs::create_dir_all(&layout.view)
+                .with_context(|| format!("create view dir {}", layout.view.display()))?;
+            std::os::unix::fs::symlink(&layout.view, mountpoint).with_context(|| {
+                format!(
+                    "create symlink {} -> {}",
+                    mountpoint.display(),
+                    layout.view.display()
+                )
+            })?;
+            let session = mount_cow(&layout.real, upper, &layout.view, "cowt")?;
+            eprintln!(
+                "cowt: FUSE-T mounted at {} (upper: {}, host dir moved to {})",
+                mountpoint.display(),
+                upper.display(),
+                layout.real.display()
+            );
+            Ok(MountGuard::with_session(mountpoint.to_path_buf(), session))
+        })();
+        if result.is_err() {
+            // Roll back: drop the symlink and move the host dir back.
+            if fs::symlink_metadata(mountpoint)
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                let _ = fs::remove_file(mountpoint);
+            }
+            let _ = restore(mountpoint, &layout);
+        }
+        result
     }
 
     fn unmount(&self, mountpoint: &Path) -> Result<()> {
-        if !self.is_mounted(mountpoint) {
-            return Ok(());
+        // Idempotent: works from a fresh process (`cowt drop --force`) or
+        // from the owning `cowt run`. The FUSE session dies with its host
+        // process; here we only undo the symlink.
+        let state = match fs::read_link(mountpoint) {
+            Ok(target) => target,
+            Err(_) => return Ok(()), // not our symlink: nothing to restore
+        };
+        if state.file_name().map(|n| n != "view").unwrap_or(true) {
+            bail!(
+                "symlink at {} points at {} (not a cowt view); refusing to touch it",
+                mountpoint.display(),
+                state.display()
+            );
         }
-        let ok = Command::new("umount")
-            .arg(mountpoint)
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false);
-        if ok {
-            Ok(())
-        } else {
-            bail!("failed to unmount {}", mountpoint.display());
-        }
+        let layout = Layout {
+            real: state.parent().unwrap_or(Path::new("")).join("real"),
+            view: state.clone(),
+        };
+        let _ = fs::remove_dir_all(&state);
+        fs::remove_file(mountpoint)
+            .with_context(|| format!("remove symlink at {}", mountpoint.display()))?;
+        restore(mountpoint, &layout)
     }
 
     fn is_mounted(&self, mountpoint: &Path) -> bool {
-        // `mount` lists "<device> on <mountpoint> (<type>, ...)". The device
-        // field is the upper dir; match the mountpoint position only.
-        let needle = format!(" on {} ", mountpoint.display());
-        Command::new("mount")
-            .output()
-            .map(|o| String::from_utf8_lossy(&o.stdout).contains(&needle))
+        fs::symlink_metadata(mountpoint)
+            .map(|m| m.file_type().is_symlink())
             .unwrap_or(false)
     }
+}
+
+/// Paths derived from the worktree state dir (upper's parent): the moved-aside
+/// host dir (`real`) and the FUSE mountpoint (`view`).
+struct Layout {
+    real: PathBuf,
+    view: PathBuf,
+}
+
+impl Layout {
+    fn from_upper(upper: &Path) -> Layout {
+        let state = upper
+            .parent()
+            .expect("upper always sits directly in the state dir");
+        Layout {
+            real: state.join("real"),
+            view: state.join("view"),
+        }
+    }
+}
+
+/// Restore the host directory: move `state/real` back to `mountpoint`.
+fn restore(mountpoint: &Path, layout: &Layout) -> Result<()> {
+    if !layout.real.exists() {
+        return Ok(()); // already restored
+    }
+    if let Ok(m) = fs::symlink_metadata(mountpoint) {
+        if m.is_dir() {
+            let _ = fs::remove_dir(mountpoint);
+        } else {
+            bail!(
+                "{} exists and is not a directory; refusing to restore",
+                mountpoint.display()
+            );
+        }
+    }
+    fs::rename(&layout.real, mountpoint).with_context(|| {
+        format!(
+            "restore {} from {}",
+            mountpoint.display(),
+            layout.real.display()
+        )
+    })
 }

@@ -119,7 +119,10 @@ impl Env {
         }
         #[cfg(windows)]
         {
-            fs::read_link(target).is_ok()
+            // A live WinFsp mount is a reparse point; a hard-killed run left
+            // either the reparse or a missing mountpoint (the driver deletes
+            // the directory) plus the moved-aside host dir.
+            fs::read_link(target).is_ok() || !target.exists()
         }
     }
 }
@@ -343,16 +346,20 @@ fn e2e_run_diff_apply() {
         fs::read_to_string(app.join("settings.txt")).unwrap(),
         "line1\nline2 CHANGED\nline3\n"
     );
-    // ...and the host dir itself is untouched (no cache.bin in upper).
-    let upper_files: Vec<String> = fs::read_dir(env.upper_of(&id))
-        .unwrap()
-        .flatten()
-        .map(|e| e.file_name().to_string_lossy().into_owned())
-        .collect();
-    assert!(
-        !upper_files.iter().any(|n| n == "cache.bin"),
-        "cache.bin appeared in upper: {upper_files:?}"
-    );
+    // ...and the deletion is visible through the view (the upper layer
+    // encodes it as a whiteout — kernel-style char dev 0:0 named cache.bin,
+    // or .wh. prefix on the other backends — checked after teardown).
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        if !app.join("cache.bin").exists() {
+            break;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "deleted file still visible in the view"
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
     wait_run(&mut sleeper);
     assert_mount_gone(&app);
 
@@ -381,16 +388,32 @@ fn e2e_run_diff_apply() {
         "key diff missing:\n{content}"
     );
 
-    // Whiteout encoding visible in the upper layer.
+    // Whiteout encoding visible in the upper layer. Kernel overlayfs uses a
+    // char dev 0:0 carrying the victim's own name; the other backends use the
+    // `.wh.` prefix. Both must be recognized.
     let upper_files: Vec<String> = fs::read_dir(env.upper_of(&id))
         .unwrap()
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    assert!(
-        upper_files.iter().any(|n| n.starts_with(".wh.")),
-        "no whiteout in upper: {upper_files:?}"
-    );
+    let whiteout_found = {
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::FileTypeExt;
+            // Kernel overlayfs: char dev 0:0 carrying the victim's own name.
+            let kernel_style = upper_files.iter().any(|n| n == "cache.bin")
+                && fs::symlink_metadata(env.upper_of(&id).join("cache.bin"))
+                    .map(|m| m.file_type().is_char_device())
+                    .unwrap_or(false);
+            kernel_style || upper_files.iter().any(|n| n.starts_with(".wh."))
+        }
+        #[cfg(windows)]
+        {
+            // Windows backend: `.wh.` prefix only (no char devices).
+            upper_files.iter().any(|n| n.starts_with(".wh."))
+        }
+    };
+    assert!(whiteout_found, "no whiteout in upper: {upper_files:?}");
 
     // Clean apply: base == current, worktree changed.
     env.cowt_ok(&["apply", &id]);
@@ -730,7 +753,7 @@ impl ForeignMount {
             fs::create_dir_all(&elsewhere).ok()?;
             let aside = env.tmp.path().join("foreign-aside");
             fs::rename(target, &aside).ok()?;
-            match junction::create(target, &elsewhere) {
+            match junction::create(&elsewhere, target) {
                 Ok(()) => Some(ForeignMount {
                     target: target.to_path_buf(),
                     kind: "junction",

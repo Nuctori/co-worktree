@@ -48,6 +48,11 @@ jobs:
       - name: "Install WinFsp (Windows: FUSE-backed integration tests)"
         if: runner.os == 'Windows'
         run: choco install winfsp -y
+      # fuser's build.rs probes pkg-config 'fuse' on macOS; without FUSE-T
+      # the crate does not compile at all, so install it before building.
+      - name: Install FUSE-T (macOS build dependency)
+        if: runner.os == 'macOS'
+        run: sudo bash scripts/macos/install-fuse-t.sh
       - run: cargo test --workspace -- --nocapture
 
   e2e:
@@ -60,11 +65,9 @@ jobs:
           # Root => kernel overlayfs backend (native performance).
           - os: ubuntu-latest
             sudo: true
-          # Root => macOS kernel union mount (`mount -t union`; no kexts,
-          # which is what makes macFUSE unusable on CI runners). macos-latest
-          # (Sequoia) removed the union.fs helper (mount_union exec fails
-          # ENOENT); macos-14 is the newest image where it still exists.
-          - os: macos-14
+          # Root => macOS FUSE-T backend (kext-less FUSE; macFUSE kexts and
+          # the kernel union mount are both unavailable on current images).
+          - os: macos-latest
             sudo: true
           # Admin runner => WinFsp kernel driver via choco.
           - os: windows-latest
@@ -79,19 +82,21 @@ jobs:
       - name: Install WinFsp (Windows)
         if: runner.os == 'Windows'
         run: choco install winfsp -y
-      - name: Install union mount helper (macOS)
+      - name: Install FUSE-T (macOS)
         if: runner.os == 'macOS'
-        run: sudo bash scripts/macos/install-union-helper.sh
+        run: sudo bash scripts/macos/install-fuse-t.sh
       - name: Run E2E acceptance suite
         shell: bash
         run: |
           if [ "${{ matrix.sudo }}" = "true" ]; then
             # sudo -E keeps RUSTUP_HOME/CARGO_HOME, but sudoers rewrites PATH:
             # pass it through explicitly or `cargo` is not found.
+            # --test-threads=1: the suite mounts real filesystems; parallel
+            # tests on shared backends (WinFsp) are timing-fragile.
             sudo -E env "PATH=$PATH" bash -c \
-              'cargo test --test e2e -- --ignored --nocapture'
+              'cargo test --test e2e -- --ignored --nocapture --test-threads=1'
           else
-            cargo test --test e2e -- --ignored --nocapture
+            cargo test --test e2e -- --ignored --nocapture --test-threads=1
           fi
 
   cross-platform-check:
@@ -102,7 +107,9 @@ jobs:
       matrix:
         target:
           - x86_64-pc-windows-msvc
-          - x86_64-apple-darwin
+          # x86_64-apple-darwin was removed: fuser cannot build for macOS on
+          # a Linux host (its build.rs probes pkg-config 'fuse' on the host);
+          # the macOS target is compiled natively by the macos test job.
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable

@@ -18,9 +18,10 @@ cargo install --path crates/cowt --bin cowt   # 或从 Releases 下载单二进�
 macOS 与 Windows：
 
 ```sh
-# macOS: 内核 union mount（BSD 风格），无需第三方驱动；挂载需要 root
-cargo install --path crates/cowt    # 或从 Releases 下载二进制
-sudo cowt run vscode -- code        # run 需要 sudo（mount 是特权操作）
+# macOS: FUSE-T（kext-less FUSE，经 NFS 实现）——无内核扩展、无批准弹窗
+cargo install --path crates/cowt --bin cowt   # 或从 Releases 下载
+sudo bash scripts/macos/install-fuse-t.sh     # 一次性安装 FUSE-T + 链接 libfuse
+sudo cowt run vscode -- code                  # run 需要 sudo（mount 是特权操作）
 
 # Windows: 需要 WinFsp（签名内核驱动 + 用户态 DLL）
 choco install winfsp                  # 或从 https://winfsp.dev 安装
@@ -79,15 +80,15 @@ cowt drop vscode                  # 进程在跑会拒绝；--force 先杀进程
 | 平台 | 后端 | 要求 | 特点 |
 | --- | --- | --- | --- |
 | Linux | kernel overlayfs（root）/ kernel overlayfs+userns（非 root）/ fuse-overlayfs（兜底） | fuse-overlayfs 包 | 运行时自动探测；删除落为 whiteout（char dev 0:0 原名 / `.wh.` 前缀零大小文件两种编码均支持解析） |
-| macOS | 内核 union mount（`mount -t union`，BSD 风格） | root | 无第三方驱动（macFUSE kext 无法在 CI 无人值守批准）；删除落为 `.wh.` whiteout；Apple 文件接口（Finder 等）对 union 支持不佳，POSIX 程序正常 |
-| Windows | WinFsp 用户态 CoW 文件系统（`winfsp` 绑定） | 安装 WinFsp（choco / 官网） | 运行期宿主目录移到 `state/<id>/real`，原路径变为 junction → WinFsp 视图；junction 无需特权；删除落为 `.wh.` whiteout；用户态 I/O 写路径开销高于内核后端 |
+| macOS | FUSE-T 用户态 CoW 文件系统（`fuser` 绑定，经 NFS 实现，kext-less） | 安装 FUSE-T（`scripts/macos/install-fuse-t.sh`）+ root | 无内核扩展（macFUSE kext 无法在 CI 无人值守批准；Apple 移除了内核 union mount）；运行期宿主目录移到 `state/<id>/real`，原路径变 symlink → 挂载视图；删除落为 `.wh.` whiteout |
+| Windows | WinFsp 用户态 CoW 文件系统（`winfsp` 绑定） | 安装 WinFsp（choco / 官网） | 运行期宿主目录移到 `state/<id>/real`，WinFsp 直接挂载到原路径；删除落为 `.wh.` whiteout（大小写规范化处理）；用户态 I/O 写路径开销高于内核后端 |
 
 运行时探测，无需配置；`cowt doctor` 显示当前后端。三种后端共用同一套 whiteout 编码，
 diff / merge / apply 逻辑完全一致。
 
 设计决策：同步 I/O 无 async runtime（FUSE 回调模型是同步的）；零网络服务、零容器运行时，
-完全离线可用；MVP 不隔离 Windows 注册表（现代应用配置已文件化）；Windows 后端不处理
-符号链接语义（junction 视为普通目录项）。
+完全离线可用；MVP 不隔离 Windows 注册表（现代应用配置已文件化）；macOS/Windows 后端不处理
+符号链接语义。
 
 ## 边界声明
 
@@ -114,11 +115,11 @@ diff / merge / apply 逻辑完全一致。
 
 ```sh
 cargo test --workspace                # 单元测试 + CLI 集成测试（后端可用时含真实挂载）
-cargo test --test e2e -- --ignored    # 端到端验收（Linux/macOS 需 root，Windows 需 WinFsp）
+cargo test --test e2e -- --ignored --test-threads=1   # 端到端验收（root / WinFsp）
 ```
 
 CI（GitHub Actions）：rustfmt、clippy `-D warnings`、三平台全量测试、三平台真实后端
-E2E（Linux kernel-overlay / macOS union / Windows WinFsp）、Windows/macOS 交叉编译检查、
+E2E（Linux kernel-overlay / macOS FUSE-T / Windows WinFsp）、Windows 交叉编译检查、
 三平台 release 构建产物上传。
 
 ## License

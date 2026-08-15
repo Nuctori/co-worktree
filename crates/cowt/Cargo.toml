@@ -28,6 +28,7 @@ serde_json.workspace = true
 [target.'cfg(windows)'.dependencies]
 winfsp = { version = "0.12", default-features = false, features = [
   "delayload",
+  "debug",
 ] }
 windows = { version = "0.61", features = [
   "Win32_Foundation",
@@ -38,6 +39,10 @@ windows = { version = "0.61", features = [
   "Win32_Storage_FileSystem",
 ] }
 junction = "1.2"
+
+[target.'cfg(target_os = "macos")'.dependencies]
+fuser = "0.15"
+libc = "0.2"
 
 [target.'cfg(windows)'.build-dependencies]
 winfsp = { version = "0.12", default-features = false, features = [
