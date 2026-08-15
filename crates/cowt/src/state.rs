@@ -277,9 +277,27 @@ mod tests {
 
     #[test]
     fn pid_alive_known_and_unknown() {
-        // Our own process is always alive; a pid that cannot exist is not.
+        // Our own process is always alive; a pid that just exited is not.
+        // (u32::MAX is unusable: as i32 it is -1, which kill(-1, 0) treats as
+        // a broadcast to every process and reports alive.)
         assert!(pid_alive(std::process::id()));
-        assert!(!pid_alive(u32::MAX));
+        let mut child = {
+            #[cfg(unix)]
+            {
+                std::process::Command::new("sh").arg("-c").arg("exit 0")
+            }
+            #[cfg(windows)]
+            {
+                let mut c = std::process::Command::new("cmd");
+                c.args(["/C", "exit", "0"]);
+                c
+            }
+        }
+        .spawn()
+        .unwrap();
+        let dead_pid = child.id();
+        let _ = child.wait();
+        assert!(!pid_alive(dead_pid));
     }
 
     #[test]
