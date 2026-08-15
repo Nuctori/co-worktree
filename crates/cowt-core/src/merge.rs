@@ -38,8 +38,10 @@ pub enum Operation {
     WriteSymlink { path: PathBuf, target: PathBuf },
     /// Create a directory.
     Mkdir { path: PathBuf },
-    /// Delete a file, symlink or empty directory.
-    Delete { path: PathBuf },
+    /// Delete a file, symlink or empty directory. `migration` marks a
+    /// kind-migration delete (file↔dir, symlink↔file): it must run BEFORE
+    /// the matching Mkdir/WriteFile of the new kind, so it sorts first.
+    Delete { path: PathBuf, migration: bool },
 }
 
 /// Why a path could not be merged automatically.
@@ -113,8 +115,24 @@ pub fn plan(base: &Manifest, current: &Manifest, work: &Manifest, work_root: &Pa
         if b_eq_c {
             // Host untouched -> the worktree change applies cleanly.
             match w {
-                Some(entry) => out.operations.push(write_op(&path, entry, work_root)),
-                None => out.operations.push(Operation::Delete { path }),
+                Some(entry) => {
+                    // Kind migration (file<->dir, symlink<->file): the old
+                    // entry must be deleted first or create_dir_all / rename
+                    // hits the wrong kind and the change becomes un-applyable.
+                    if let Some(b_entry) = b {
+                        if b_entry.kind != entry.kind {
+                            out.operations.push(Operation::Delete {
+                                path: path.clone(),
+                                migration: true,
+                            });
+                        }
+                    }
+                    out.operations.push(write_op(&path, entry, work_root));
+                }
+                None => out.operations.push(Operation::Delete {
+                    path,
+                    migration: false,
+                }),
             }
             continue;
         }
@@ -182,12 +200,14 @@ fn write_op(path: &Path, entry: &Entry, work_root: &Path) -> Operation {
 
 /// Sort key: (depth, kind-order, path). Mkdir=0, writes=1, deletes=2 so that
 /// directories exist before their files and files vanish before their dirs.
+/// Kind-migration deletes (order 0) run first so the old entry is gone
+/// before the new kind is created at the same path.
 fn op_sort_key(op: &Operation) -> (usize, u8, PathBuf) {
     let (path, order) = match op {
         Operation::Mkdir { path } => (path, 0u8),
         Operation::WriteFile { path, .. } => (path, 1),
         Operation::WriteSymlink { path, .. } => (path, 1),
-        Operation::Delete { path } => (path, 2),
+        Operation::Delete { path, migration } => (path, if *migration { 0 } else { 2 }),
     };
     let depth = path.components().count();
     if order == 2 {
@@ -271,12 +291,20 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
     for op in &plan.operations {
         if let Operation::Mkdir { path } = op {
             let dest = target_root.join(path);
+            // Kind migration file->dir: the old non-directory entry must go
+            // before the dir can be created (the planner's migration Delete
+            // runs in the later Delete phase — handle it here).
+            if let Ok(m) = fs::symlink_metadata(&dest) {
+                if !m.is_dir() {
+                    fs::remove_file(&dest).map_err(|e| Error::io(dest.clone(), e))?;
+                }
+            }
             fs::create_dir_all(&dest).map_err(|e| Error::io(dest.clone(), e))?;
             report.written += 1;
         }
     }
     for op in &plan.operations {
-        if let Operation::Delete { path } = op {
+        if let Operation::Delete { path, .. } = op {
             let dest = target_root.join(path);
             let meta = fs::symlink_metadata(&dest);
             match meta {
@@ -315,7 +343,7 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
         .operations
         .iter()
         .filter_map(|op| match op {
-            Operation::Delete { path } => path.parent().map(|p| p.to_path_buf()),
+            Operation::Delete { path, .. } => path.parent().map(|p| p.to_path_buf()),
             _ => None,
         })
         .collect();
@@ -351,17 +379,31 @@ fn write_symlink(_target: &Path, dest: &Path) -> Result<()> {
     ))
 }
 
+/// Move the staged body into place, handling a directory left at the
+/// destination (kind migration dir→file whose Delete was skipped by the
+/// conservative non-empty rule): a now-empty dir is removed so the rename
+/// can proceed; anything else fails loudly. The platform rename itself
+/// lives in `do_rename`.
+fn commit_rename(staged: &Path, dest: &Path) -> Result<()> {
+    if let Ok(m) = fs::symlink_metadata(dest) {
+        if m.is_dir() {
+            fs::remove_dir(dest).map_err(|e| Error::io(dest.to_path_buf(), e))?;
+        }
+    }
+    do_rename(staged, dest)
+}
+
 /// Move the staged body into place. On unix `rename(2)` atomically replaces
 /// the destination; Windows `MoveFile` refuses to overwrite, so the old file
 /// is removed first — the commit is no longer atomic there, but the staging
 /// phase still guarantees zero pollution on any pre-commit failure.
 #[cfg(unix)]
-fn commit_rename(staged: &Path, dest: &Path) -> Result<()> {
+fn do_rename(staged: &Path, dest: &Path) -> Result<()> {
     fs::rename(staged, dest).map_err(|e| Error::io(dest.to_path_buf(), e))
 }
 
 #[cfg(not(unix))]
-fn commit_rename(staged: &Path, dest: &Path) -> Result<()> {
+fn do_rename(staged: &Path, dest: &Path) -> Result<()> {
     let _ = fs::remove_file(dest); // replace: Windows rename fails if dest exists
     fs::rename(staged, dest).map_err(|e| Error::io(dest.to_path_buf(), e))
 }

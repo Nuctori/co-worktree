@@ -143,7 +143,7 @@ fn print_plan(plan: &merge::MergePlan) {
                 "  mkdir  {}",
                 crate::state::sanitize_display(&path.display().to_string())
             ),
-            merge::Operation::Delete { path } => println!(
+            merge::Operation::Delete { path, .. } => println!(
                 "  delete {}",
                 crate::state::sanitize_display(&path.display().to_string())
             ),

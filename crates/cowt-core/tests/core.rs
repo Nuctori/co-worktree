@@ -445,3 +445,54 @@ fn merge_converged_sides_are_noop() {
     assert!(plan.operations.is_empty());
     assert_eq!(plan.converged, vec![std::path::PathBuf::from("a.txt")]);
 }
+
+#[test]
+fn merge_file_to_dir_migration() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    // base/host: x is a FILE; work: x became a DIR with a child.
+    write(&base, "x", "old");
+    write(&host, "x", "old");
+    fs::create_dir_all(work.join("x")).unwrap();
+    write(&work, "x/inner.txt", "new");
+
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan.is_clean(), "file->dir migration must not conflict");
+    let out = merge::execute(&plan, &host).unwrap();
+    assert_eq!(out.written, 2);
+    assert_eq!(fs::read_to_string(host.join("x/inner.txt")).unwrap(), "new");
+    assert!(
+        !host.join("x").is_file(),
+        "old file must be replaced by dir"
+    );
+    assert!(!fs::symlink_metadata(host.join("x")).unwrap().is_file());
+}
+
+#[test]
+fn merge_dir_to_file_migration() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    // base/host: x is a DIR with inner.txt; work: x became a FILE.
+    fs::create_dir_all(base.join("x")).unwrap();
+    write(&base, "x/inner.txt", "old");
+    fs::create_dir_all(host.join("x")).unwrap();
+    write(&host, "x/inner.txt", "old");
+    write(&work, "x", "now-a-file");
+
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan.is_clean(), "dir->file migration must not conflict");
+    let out = merge::execute(&plan, &host).unwrap();
+    assert_eq!(out.written, 1);
+    assert_eq!(fs::read_to_string(host.join("x")).unwrap(), "now-a-file");
+    assert!(!host.join("x").is_dir(), "old dir must be replaced by file");
+}
