@@ -467,17 +467,30 @@ impl CowFs {
         None
     }
 
-    /// Copy a lower-only file into upper (parents included). Safe when the
-    /// file is already in upper (no-op-ish: skips the copy).
+    /// Copy a lower-only file into upper (parents included). Atomic via a
+    /// temp file + rename, and an existing upper copy is only trusted when
+    /// its size matches the lower file: a torn copy from a crashed run
+    /// (kill mid-`fs::copy`) would otherwise be silently reused as the base
+    /// and later applied to the host as garbage.
     fn copy_up(&self, rel: &Path) -> io::Result<PathBuf> {
         let src = self.lower_of(rel);
         let dst = self.upper_of(rel);
         if let Some(p) = dst.parent() {
             fs::create_dir_all(p)?;
         }
-        if fs::symlink_metadata(&dst).is_err() {
-            fs::copy(&src, &dst)?;
+        match fs::symlink_metadata(&dst) {
+            Err(_) => {}
+            Ok(m) => {
+                let src_meta = fs::symlink_metadata(&src)?;
+                if m.len() == src_meta.len() {
+                    return Ok(dst); // trusted existing copy
+                }
+                // Torn copy (wrong size): replace below.
+            }
         }
+        let tmp = dst.with_extension("tmp");
+        fs::copy(&src, &tmp)?;
+        fs::rename(&tmp, &dst)?;
         Ok(dst)
     }
 
@@ -531,7 +544,10 @@ impl CowFs {
     /// The *actual* on-disk name of `rel`'s final component: WinFsp passes
     /// names normalized to uppercase and Windows' case-insensitive FS would
     /// happily create `.wh.UPPER` entries that never match the lowercase
-    /// base manifest. Enumerate the parent to find the real spelling.
+    /// base manifest. Enumerate the parent to find the real spelling —
+    /// LOWER first, because a just-copy-up'd upper entry may carry the
+    /// WinFsp-supplied (uppercase) spelling, while the host dir holds the
+    /// spelling the manifest was built from.
     fn actual_disk_name(&self, rel: &Path) -> String {
         let needle = rel
             .file_name()
@@ -544,8 +560,8 @@ impl CowFs {
                     .find(|e| e.file_name().to_string_lossy().to_lowercase() == needle)
             })
         };
-        find(&self.upper_of(parent))
-            .or_else(|| find(&self.lower_of(parent)))
+        find(&self.lower_of(parent))
+            .or_else(|| find(&self.upper_of(parent)))
             .map(|e| e.file_name().to_string_lossy().into_owned())
             .unwrap_or_else(|| {
                 rel.file_name()
@@ -902,14 +918,17 @@ impl FileSystemContext for CowFs {
         if replace_if_exists {
             let _ = self.delete_merged(&dst);
         }
-        fs::rename(&src_up, &dst_up)?;
         if lower_has {
+            // Whiteout BEFORE the rename: a crash between the two steps
+            // leaves either "rename done" (whiteout + dst) or "not done"
+            // (src copy still visible) — never a duplicate of both trees.
             // The whiteout must carry the *actual* disk spelling (WinFsp
             // passes names normalized to uppercase).
             let actual = self.actual_disk_name(&src);
             let wh = src_up.with_file_name(format!("{WHITEOUT_PREFIX}{actual}"));
             fs::write(&wh, b"")?;
         }
+        fs::rename(&src_up, &dst_up)?;
         Ok(())
     }
 
@@ -1009,5 +1028,34 @@ impl FileSystemContext for CowFs {
         out_volume_info.free_size = if ok { free } else { 0 };
         out_volume_info.set_volume_label("cowt");
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn copy_up_replaces_torn_copy() {
+        let tmp = tempfile::tempdir().unwrap();
+        let lower = tmp.path().join("lower");
+        let upper = tmp.path().join("upper");
+        fs::create_dir_all(&lower).unwrap();
+        fs::create_dir_all(&upper).unwrap();
+        let body = b"complete body of the lower file";
+        fs::write(lower.join("f.txt"), body).unwrap();
+        let fs = CowFs {
+            lower: lower.clone(),
+            upper: upper.clone(),
+        };
+        // Simulate a torn copy from a crashed run: right size check fails.
+        fs::write(upper.join("f.txt"), b"torn").unwrap();
+        let dst = fs.copy_up(Path::new("f.txt")).unwrap();
+        assert_eq!(fs::read(&dst).unwrap(), body, "torn copy must be replaced");
+        // A matching existing copy is trusted (no rewrite).
+        let m = fs::metadata(&dst).unwrap();
+        assert_eq!(m.len(), body.len() as u64);
+        let dst2 = fs.copy_up(Path::new("f.txt")).unwrap();
+        assert_eq!(fs::read(&dst2).unwrap(), body);
     }
 }

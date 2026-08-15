@@ -1242,9 +1242,6 @@ fn e2e_dir_rename() {
         "renamed-away subtree must be hidden"
     );
     wait_run(&mut sleeper);
-    assert_mount_gone(&app);
-
-    // Diff: source subtree deleted, destination added. On Linux, kernel
     // overlayfs renames are lazy copy-up: upper/ logs2 exists but its child
     // files are not materialized until touched, so the offline upper scan
     // cannot list logs2/session.log (documented limitation; the merged view

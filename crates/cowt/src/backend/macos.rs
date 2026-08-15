@@ -194,16 +194,29 @@ impl CowFs {
         names
     }
 
-    /// Copy a lower-only file into upper (parents included).
+    /// Copy a lower-only file into upper (parents included). Atomic via a
+    /// temp file + rename; an existing upper copy is only trusted when its
+    /// size matches the lower file (a torn copy from a crashed run must not
+    /// be silently reused as the base).
     fn copy_up(&self, rel: &Path) -> io::Result<PathBuf> {
         let src = self.lower_of(rel);
         let dst = self.upper_of(rel);
         if let Some(p) = dst.parent() {
             fs::create_dir_all(p)?;
         }
-        if fs::symlink_metadata(&dst).is_err() {
-            fs::copy(&src, &dst)?;
+        match fs::symlink_metadata(&dst) {
+            Err(_) => {}
+            Ok(m) => {
+                let src_meta = fs::symlink_metadata(&src)?;
+                if m.len() == src_meta.len() {
+                    return Ok(dst); // trusted existing copy
+                }
+                // Torn copy (wrong size): replace below.
+            }
         }
+        let tmp = dst.with_extension("tmp");
+        fs::copy(&src, &tmp)?;
+        fs::rename(&tmp, &dst)?;
         Ok(dst)
     }
 
@@ -488,10 +501,9 @@ impl Filesystem for CowFs {
             }
         }
         let _ = self.delete_merged(&dst); // replace-if-exists semantics
-        if let Err(e) = fs::rename(&src_up, &dst_up) {
-            return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
-        }
         if lower_has {
+            // Whiteout BEFORE the rename: a crash between the steps leaves
+            // either "rename done" or "not done" — never both trees.
             let name = match src.file_name().and_then(|n| n.to_str()) {
                 Some(n) => n,
                 None => return reply.error(libc::EINVAL),
@@ -502,6 +514,9 @@ impl Filesystem for CowFs {
             ) {
                 return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
             }
+        }
+        if let Err(e) = fs::rename(&src_up, &dst_up) {
+            return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
         }
         reply.ok()
     }
