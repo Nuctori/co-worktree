@@ -141,7 +141,13 @@ impl State {
             bail!("invalid worktree id or name '{id_or_name}'");
         }
         let direct = self.dir(id_or_name);
-        if direct.join("meta.json").exists() {
+        // A worktree-shaped directory (meta.json present, or a half-created
+        // fork: manifest.json already written) resolves by id even when
+        // meta.json is missing/corrupt — commands decide how to handle the
+        // damage (drop --force can discard it; round-23).
+        if direct.join("meta.json").exists()
+            || (direct.is_dir() && direct.join("manifest.json").is_file())
+        {
             return Ok(direct);
         }
         // Try name lookup.
@@ -190,8 +196,23 @@ impl State {
             if entry.file_name().to_string_lossy().starts_with(".trash-") {
                 continue;
             }
-            if let Ok(meta) = Self::load_meta(&dir) {
-                out.push(meta);
+            if !dir.is_dir() || !dir.join("meta.json").exists() {
+                continue;
+            }
+            // A `.trash-*` rename-aside from a failed `drop` is not a
+            // worktree; hide it from list/resolve so no ghost entries.
+            if entry.file_name().to_string_lossy().starts_with(".trash-") {
+                continue;
+            }
+            match Self::load_meta(&dir) {
+                Ok(meta) => out.push(meta),
+                // Round-23: a corrupt meta.json must not be silently hidden
+                // — the directory still exists and blocks drop; surface it.
+                Err(e) => eprintln!(
+                    "cowt: warning: unreadable meta.json in {} ({e}); use `cowt drop {} --force` to discard",
+                    dir.display(),
+                    entry.file_name().to_string_lossy()
+                ),
             }
         }
         out.sort_by_key(|a| a.created_epoch);

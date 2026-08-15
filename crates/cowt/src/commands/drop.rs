@@ -15,8 +15,39 @@ pub struct DropArgs {
 pub fn drop_cmd(args: DropArgs) -> Result<()> {
     let state = State::open()?;
     let dir = state.resolve(&args.id)?;
-    let meta = State::load_meta(&dir)?;
+    // Round-23: a corrupt/unreadable meta.json (half-created fork, disk
+    // damage) must not brick drop. Without --force we refuse with a clear
+    // message; with --force we degrade to a synthetic meta (id from the
+    // directory name, unknown target) and skip the mount checks — the
+    // target cannot be known, and a foreign mount on an unknown target
+    // cannot be verified. The `real` dir data-loss guard below still
+    // applies (it does not need meta).
+    let meta = match State::load_meta(&dir) {
+        Ok(m) => m,
+        Err(e) => {
+            if !args.force {
+                bail!(
+                    "worktree state at {} has an unreadable meta.json ({e:#}); \
+                     use --force to discard the damaged worktree",
+                    dir.display()
+                );
+            }
+            eprintln!("cowt: --force: discarding worktree with unreadable meta.json ({e:#})");
+            crate::state::WorktreeMeta {
+                id: dir
+                    .file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default(),
+                name: None,
+                target: std::path::PathBuf::new(),
+                created_epoch: 0,
+                status: crate::state::Status::Ready,
+                backend: String::new(),
+            }
+        }
+    };
     let backend = default_backend();
+    let target_known = !meta.target.as_os_str().is_empty();
 
     // 1. A live process holds the overlay: refuse, or kill with --force.
     if let Some(pid) = State::running_pid(&dir) {
@@ -40,41 +71,47 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
     // moved-aside `real` dir — the kill-window crash case where the pidfile
     // was never written) are torn down. A foreign mount on the target is
     // never unmounted, even with --force (D-005 boundary).
+    //
+    // With a degraded meta (corrupt meta.json, --force) the target is
+    // unknown: no mount check is possible, and the `real`-dir guard below
+    // is the remaining data-loss protection.
     let mut foreign_mount = false;
-    for _ in 0..30 {
-        if !backend.is_mounted(&meta.target) {
-            break;
+    if target_known {
+        for _ in 0..30 {
+            if !backend.is_mounted(&meta.target) {
+                break;
+            }
+            let own_leftover = State::stale_run(&dir) || dir.join("real").exists();
+            if !own_leftover {
+                foreign_mount = true;
+                break;
+            }
+            if !args.force {
+                bail!(
+                    "{} is still mounted; refusing to drop. Unmount it or use --force.",
+                    meta.target.display()
+                );
+            }
+            eprintln!("cowt: --force: unmounting {}", meta.target.display());
+            let _ = backend.unmount(&meta.target); // tolerate races; verify below
+            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        let own_leftover = State::stale_run(&dir) || dir.join("real").exists();
-        if !own_leftover {
-            foreign_mount = true;
-            break;
-        }
-        if !args.force {
+        if foreign_mount || backend.is_mounted(&meta.target) {
+            if dir.join("real").exists() {
+                // Our own stale state: the mount could not be torn down because
+                // something blocks the target (external dir, permissions).
+                bail!(
+                    "{} is blocked by leftover state (host dir still moved aside at {}); \
+                     clear the blocker at the mount point, then drop again",
+                    meta.target.display(),
+                    dir.join("real").display()
+                );
+            }
             bail!(
-                "{} is still mounted; refusing to drop. Unmount it or use --force.",
+                "{} is mounted by something else (not a cowt leftover); refusing to unmount it",
                 meta.target.display()
             );
         }
-        eprintln!("cowt: --force: unmounting {}", meta.target.display());
-        let _ = backend.unmount(&meta.target); // tolerate races; verify below
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    if foreign_mount || backend.is_mounted(&meta.target) {
-        if dir.join("real").exists() {
-            // Our own stale state: the mount could not be torn down because
-            // something blocks the target (external dir, permissions).
-            bail!(
-                "{} is blocked by leftover state (host dir still moved aside at {}); \
-                 clear the blocker at the mount point, then drop again",
-                meta.target.display(),
-                dir.join("real").display()
-            );
-        }
-        bail!(
-            "{} is mounted by something else (not a cowt leftover); refusing to unmount it",
-            meta.target.display()
-        );
     }
 
     // 3. Atomic-ish removal: rename aside first so the worktree id vanishes

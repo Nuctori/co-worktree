@@ -67,11 +67,17 @@ impl Env {
     }
 
     fn upper(&self) -> PathBuf {
+        self.state_dir().join("upper")
+    }
+
+    /// The state directory of the first (only) worktree — state dirs are
+    /// keyed by id, not name.
+    fn state_dir(&self) -> PathBuf {
         // Resolve id via list --json.
         let out = self.cowt().args(["list", "--json"]).output().unwrap();
         let v: serde_json::Value = serde_json::from_slice(&out.stdout).expect("list --json parses");
         let id = v[0]["id"].as_str().unwrap();
-        self.state.join(id).join("upper")
+        self.state.join(id)
     }
 
     fn fuse_available(&self) -> bool {
@@ -706,4 +712,116 @@ fn run_reports_signal_killed_child() {
         Some(0),
         "signal death must exit non-zero"
     );
+}
+
+// ---------------------------------------------------------------- R23
+
+/// Round-23: apply must refuse a semantically-corrupted base manifest —
+/// entries wiped (or from another tree) + a whiteout in upper means the
+/// deletion intent would be silently dropped (0 ops, rc=0), then upper
+/// cleared and baseline advanced, destroying the only record of the intent.
+#[test]
+fn apply_refuses_corrupted_base_with_whiteout() {
+    let env = Env::new();
+    env.fork();
+    // Corrupt the base manifest: wipe entries (valid JSON, wrong semantics).
+    let dir = env.state_dir();
+    let manifest = dir.join("manifest.json");
+    let v: serde_json::Value = serde_json::from_slice(&fs::read(&manifest).unwrap()).unwrap();
+    let mut v = v;
+    v["entries"] = serde_json::json!({});
+    fs::write(&manifest, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+    // Plant a deletion marker for a file that IS on the host but NOT in base.
+    fs::create_dir_all(dir.join("upper")).unwrap();
+    fs::write(dir.join("upper/.wh.config.txt"), b"").unwrap();
+
+    let out = env.cowt().args(["apply", "demo"]).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "apply must refuse corrupted base (was: rc=0 '0 written, 0 deleted')"
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("corrupt") || err.contains("base"),
+        "refusal must explain the base corruption: {err}"
+    );
+    // The upper layer must NOT have been cleared (intent preserved).
+    assert!(
+        dir.join("upper/.wh.config.txt").exists(),
+        "upper must survive a refused apply"
+    );
+}
+
+/// Round-23: drop must be able to clean up a worktree whose meta.json is
+/// corrupt or missing (half-created fork) — currently it is blocked even
+/// with --force, and list silently hides the directory.
+#[test]
+fn drop_recovers_corrupt_meta() {
+    let env = Env::new();
+    env.fork();
+    let id = env
+        .state_dir()
+        .file_name()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    let dir = env.state_dir();
+
+    // Corrupt meta.json -> list must NOT silently hide it, drop --force
+    // must still remove the directory (by id; the name lives in the corrupt
+    // meta.json and is unrecoverable).
+    fs::write(dir.join("meta.json"), "{\"id\":").unwrap();
+    let out = env.cowt().args(["list"]).output().unwrap();
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("unreadable meta.json"),
+        "list must warn about the corrupt worktree, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let out = env.cowt().args(["drop", &id]).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "drop without --force must refuse damaged meta"
+    );
+    let out = env.cowt().args(["drop", &id, "--force"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "drop --force must clean damaged meta: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!dir.exists(), "damaged worktree dir must be removed");
+}
+
+/// Round-23: recovery paths — missing manifest / missing upper / garbage
+/// run.pid must not block drop or break diff (regression lock).
+#[test]
+fn corrupted_state_recovery_paths() {
+    let env = Env::new();
+    env.fork();
+    let dir = env.state_dir();
+    let upper = dir.join("upper");
+
+    // Garbage run.pid: treated as not-running (safe no-op).
+    fs::write(dir.join("run.pid"), "not-a-pid\n").unwrap();
+    let out = env.cowt().args(["diff", "demo"]).output().unwrap();
+    assert!(out.status.success(), "garbage run.pid must not break diff");
+
+    // Missing upper: diff degrades (io error) but drop still works.
+    fs::remove_dir_all(&upper).unwrap();
+    fs::remove_file(dir.join("run.pid")).unwrap();
+    let out = env.cowt().args(["diff", "demo"]).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "missing upper must be reported by diff"
+    );
+    let out = env
+        .cowt()
+        .args(["drop", "demo", "--force"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "drop must work with missing upper: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!dir.exists(), "worktree dir must be removed");
 }

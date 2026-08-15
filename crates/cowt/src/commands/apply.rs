@@ -34,6 +34,26 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
     // preserving both (touch -r, rsync -t, FAT 2s mtime granularity) — a
     // silent overwrite of that change by apply would lose data.
     let current = Manifest::scan(&meta.target)?.manifest;
+    // Round-23 guard: a whiteout whose victim exists on the host but NOT in
+    // the base manifest means the base is semantically corrupted (entries
+    // wiped, or a foreign manifest copied in). Planning would hit the
+    // b_eq_w "keep host" branch, silently dropping the worktree's deletion
+    // intent — then apply would clear upper and advance the baseline,
+    // destroying the only record of the intent. Refuse loudly instead.
+    // (A legitimate create-then-delete whiteout never matches: its victim
+    // is absent from the host too.)
+    for victim in overlay::whiteout_victims(&upper) {
+        if base.get(&victim).is_none() && current.get(&victim).is_some() {
+            bail!(
+                "worktree '{}' has a deletion marker for '{}' but the base manifest \
+                 has no such entry (base manifest is corrupted or from another tree); \
+                 refusing to apply so the deletion intent is not silently lost. \
+                 Restore the original manifest.json, or drop the worktree",
+                meta.id,
+                victim.display()
+            );
+        }
+    }
     let work = overlay::effective_manifest(&base, &upper)?;
 
     let plan = merge::plan(&base, &current, &work, &upper);

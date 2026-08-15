@@ -94,6 +94,17 @@ pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
     Ok(manifest)
 }
 
+/// The relative paths whiteouted by `upper` (victims, not marker names).
+/// Used by apply to cross-check whiteout targets against the base manifest
+/// (a whiteout whose victim exists on the host but not in base means the
+/// base is semantically corrupt — see apply.rs round-23 guard).
+pub fn whiteout_victims(upper: &Path) -> Vec<PathBuf> {
+    let mut deleted = Vec::new();
+    let mut opaque_dirs = Vec::new();
+    collect_whiteouts(upper, upper, &mut deleted, &mut opaque_dirs);
+    deleted
+}
+
 /// Walk `dir` looking for overlayfs whiteouts.
 ///
 /// Two encodings exist in the wild, and we accept both:

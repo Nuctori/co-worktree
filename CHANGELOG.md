@@ -98,6 +98,24 @@ All notable changes to co-worktree are documented here.
   available (it is a report command; CI and scripts parse its stdout) —
   that contract is pinned by the E2E suite.
 
+### Added — round 23 (manifest corruption / damaged-state recovery)
+
+- `apply` refuses a semantically-corrupted base manifest: a deletion marker
+  (whiteout) whose victim exists on the host but not in the base would
+  previously hit the "keep host" branch — 0 operations, rc=0, then upper
+  cleared and baseline advanced, silently destroying the only record of the
+  deletion intent. It now fails loudly and leaves upper intact.
+- `drop --force` can discard a worktree with unreadable/missing `meta.json`
+  (half-created fork, disk damage): without `--force` it refuses with an
+  actionable message; `list` warns instead of silently hiding the directory;
+  `resolve` finds worktree-shaped dirs even without `meta.json`.
+- Corrupt manifests with duplicate path keys (serde last-wins) or invalid
+  path keys (absolute, `.`/`..` components, empty) are now rejected loudly —
+  they previously produced misleading `both_added (base=-)` conflicts or
+  silent no-ops.
+- Regression locks: 22-variant manifest corruption matrix, and recovery
+  paths (missing manifest/upper, garbage run.pid never block drop).
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX

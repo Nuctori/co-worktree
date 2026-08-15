@@ -92,7 +92,41 @@ pub struct Manifest {
     /// Creation time, seconds since UNIX epoch.
     pub created_epoch: u64,
     /// Relative path -> entry. Symlinks are leaf entries, never traversed.
+    #[serde(deserialize_with = "deserialize_entries")]
     pub entries: BTreeMap<PathBuf, Entry>,
+}
+
+/// Custom `entries` deserializer: rejects duplicate path keys, which
+/// serde_json's BTreeMap silently collapses (last-wins). A corrupt second
+/// entry would otherwise override a good one and produce misleading diff
+/// reports (round-23).
+fn deserialize_entries<'de, D>(d: D) -> std::result::Result<BTreeMap<PathBuf, Entry>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct EntriesVisitor;
+    impl<'de> serde::de::Visitor<'de> for EntriesVisitor {
+        type Value = BTreeMap<PathBuf, Entry>;
+        fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
+            f.write_str("a map of path -> entry")
+        }
+        fn visit_map<A>(self, mut map: A) -> std::result::Result<Self::Value, A::Error>
+        where
+            A: serde::de::MapAccess<'de>,
+        {
+            let mut out = BTreeMap::new();
+            while let Some((k, v)) = map.next_entry::<PathBuf, Entry>()? {
+                if out.insert(k.clone(), v).is_some() {
+                    return Err(serde::de::Error::custom(format!(
+                        "duplicate path key '{}'",
+                        k.display()
+                    )));
+                }
+            }
+            Ok(out)
+        }
+    }
+    d.deserialize_map(EntriesVisitor)
 }
 
 /// Outcome of a scan, including non-fatal warnings (e.g. unreadable files).
@@ -263,6 +297,23 @@ impl Manifest {
     pub fn from_json(s: &str) -> Result<Manifest> {
         let m: Manifest =
             serde_json::from_str(s).map_err(|e| Error::CorruptManifest(e.to_string()))?;
+        // Path keys must respect the same invariants the scanner enforces
+        // (relative, no `.`/`..`/empty components): a corrupt key would
+        // otherwise turn a real worktree change into a misleading
+        // both_added conflict or a silent no-op (round-23).
+        for rel in m.entries.keys() {
+            if rel.as_os_str().is_empty()
+                || rel.is_absolute()
+                || rel
+                    .components()
+                    .any(|c| !matches!(c, std::path::Component::Normal(_)))
+            {
+                return Err(Error::CorruptManifest(format!(
+                    "invalid path key '{}'",
+                    rel.display()
+                )));
+            }
+        }
         // A hash that is present must be a full 64-hex BLAKE3 digest. An empty
         // or truncated hash would make content_eq report phantom changes and
         // merge invent conflicts — fail loudly instead (round-21).
