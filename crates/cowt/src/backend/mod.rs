@@ -61,7 +61,7 @@ pub trait Backend: Send + Sync {
             .args(&cmd[1..])
             .spawn()
             .map_err(|e| anyhow::anyhow!("spawn '{}': {e}", cmd[0]))?;
-        write_pidfile(pidfile, child.id());
+        write_pidfile(pidfile, child.id())?;
         let result = child.wait();
         // Kernel overlayfs renames a lower directory lazily: upper/ holds the
         // renamed dir but its children stay un-materialized (resolved through
@@ -131,13 +131,44 @@ pub(crate) fn materialize_lazy_upper(view: &Path, upper: &Path) -> std::io::Resu
 /// --force` distinguish a recycled pid (old crash residue whose pid was
 /// reused by an unrelated process) from the actual child, preventing
 /// killing innocent processes.
-pub(crate) fn write_pidfile(path: &Path, pid: u32) {
+///
+/// The pidfile is created with O_EXCL: a second `cowt run` racing through
+/// the check-then-write window is refused instead of silently overwriting
+/// the first run's pidfile (which would break every stale-run gate). A
+/// pidfile whose pid is dead is stale and gets replaced.
+pub(crate) fn write_pidfile(path: &Path, pid: u32) -> std::io::Result<()> {
     let start = process_starttime(pid);
     let body = match start {
         Some(s) => format!("{pid}:{s}"),
         None => pid.to_string(),
     };
-    let _ = std::fs::write(path, body);
+    match std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+    {
+        Ok(mut f) => {
+            use std::io::Write;
+            f.write_all(body.as_bytes())?;
+            Ok(())
+        }
+        Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+            let existing = std::fs::read_to_string(path)
+                .ok()
+                .and_then(|s| s.trim().split(':').next()?.parse::<u32>().ok());
+            match existing {
+                Some(p) if crate::state::pid_alive(p) => Err(std::io::Error::new(
+                    std::io::ErrorKind::AlreadyExists,
+                    format!("another `cowt run` is in progress (pid {p})"),
+                )),
+                _ => {
+                    // Stale pidfile from a crashed run: replace it.
+                    std::fs::write(path, body)
+                }
+            }
+        }
+        Err(e) => Err(e),
+    }
 }
 
 /// Process start time in a comparable form: unix = starttime field of

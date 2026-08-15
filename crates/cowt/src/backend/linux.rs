@@ -170,7 +170,7 @@ impl FuseOverlayfs {
             .args(&cmd[1..])
             .spawn()
             .with_context(|| format!("spawn '{}'", cmd[0]))?;
-        super::write_pidfile(pidfile, child.id());
+        super::write_pidfile(pidfile, child.id())?;
         let result = child.wait();
         // Lazy copy-up: a renamed lower dir has no materialized children in
         // upper; copy them from the still-mounted view so the offline scan
@@ -223,7 +223,7 @@ impl FuseOverlayfs {
             .env("COWT_MNT", mountpoint)
             .spawn()
             .context("spawn unshare wrapper")?;
-        super::write_pidfile(pidfile, child.id());
+        super::write_pidfile(pidfile, child.id())?;
         let status = child.wait().context("wait for isolated process")?;
         Ok(status.code().unwrap_or(1))
     }
@@ -250,7 +250,7 @@ impl FuseOverlayfs {
             .args(&cmd[1..])
             .spawn()
             .with_context(|| format!("spawn '{}'", cmd[0]))?;
-        super::write_pidfile(pidfile, child.id());
+        super::write_pidfile(pidfile, child.id())?;
         let result = child.wait();
         // Always unmount, whatever the child did (including crashes).
         match self.unmount(mountpoint) {

@@ -96,6 +96,11 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
                 last_err = None;
                 break;
             }
+            // Already gone (a concurrent drop swept it): success.
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+                last_err = None;
+                break;
+            }
             Err(e) => {
                 last_err = Some(e);
                 std::thread::sleep(std::time::Duration::from_millis(100));

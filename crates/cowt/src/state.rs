@@ -66,24 +66,51 @@ impl State {
         self.root.join(id)
     }
 
-    /// Create a new worktree state directory. Fails if the id already exists.
+    /// Create a new worktree state directory. Fails if the id already exists
+    /// (atomically, via exclusive create) or a worktree with the same name
+    /// already exists.
     pub fn create(&self, meta: &WorktreeMeta, manifest: &Manifest) -> Result<PathBuf> {
         let dir = self.dir(&meta.id);
-        if dir.exists() {
-            bail!("worktree '{}' already exists", meta.id);
+        // Exclusive create: closes the check-then-create TOCTOU between two
+        // concurrent forks (a hash collision would otherwise silently
+        // overwrite the first worktree's state).
+        match fs::create_dir(&dir) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
+                bail!("worktree '{}' already exists", meta.id)
+            }
+            Err(e) => {
+                return Err(anyhow::Error::from(e))
+                    .with_context(|| format!("create state dir {}", dir.display()))
+            }
         }
-        fs::create_dir_all(dir.join("upper")).context("create upper layer")?;
-        fs::create_dir_all(dir.join("work")).context("create overlay work dir")?;
-        let manifest_json =
-            serde_json::to_string_pretty(manifest).context("serialize base manifest")?;
-        fs::write(dir.join("manifest.json"), manifest_json).context("write manifest.json")?;
-        Self::write_meta(&dir, meta)?;
-        Ok(dir)
+        if let Some(name) = &meta.name {
+            for other in self.list()? {
+                if other.name.as_deref() == Some(name.as_str()) {
+                    let _ = fs::remove_dir(&dir); // roll back the exclusive dir
+                    bail!("a worktree named '{name}' already exists; pick a different --name");
+                }
+            }
+        }
+        let result = (|| -> Result<()> {
+            fs::create_dir_all(dir.join("upper")).context("create upper layer")?;
+            fs::create_dir_all(dir.join("work")).context("create overlay work dir")?;
+            let manifest_json =
+                serde_json::to_string_pretty(manifest).context("serialize base manifest")?;
+            atomic_write(&dir.join("manifest.json"), manifest_json.as_bytes())
+                .context("write manifest.json")?;
+            Self::write_meta(&dir, meta)?;
+            Ok(())
+        })();
+        if result.is_err() {
+            let _ = fs::remove_dir_all(&dir); // roll back a half-created state
+        }
+        result.map(|()| dir)
     }
 
     pub fn write_meta(dir: &Path, meta: &WorktreeMeta) -> Result<()> {
         let json = serde_json::to_string_pretty(meta).context("serialize meta")?;
-        fs::write(dir.join("meta.json"), json).context("write meta.json")
+        atomic_write(&dir.join("meta.json"), json.as_bytes()).context("write meta.json")
     }
 
     /// Resolve an id-or-name to a worktree directory.
@@ -172,6 +199,15 @@ impl State {
     pub fn clear_running(dir: &Path) {
         let _ = fs::remove_file(dir.join("run.pid"));
     }
+}
+
+/// Atomic file write: temp file + rename (same filesystem). A kill -9
+/// mid-write leaves the old file intact instead of a truncated JSON that
+/// would brick the worktree (drop included).
+fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    let tmp = path.with_extension("json.tmp");
+    std::fs::write(&tmp, bytes)?;
+    std::fs::rename(&tmp, path)
 }
 
 /// Generate a short random id (8 hex chars) from /dev/urandom, time and pid.
