@@ -179,6 +179,27 @@ All notable changes to co-worktree are documented here.
 - Note: `cowt run` has no timeout by design — the child runs until it
   exits.
 
+### Added — round 27 (overlay symlink semantics / nested dirs)
+
+- A non-directory entry (symlink/file) replacing a base directory in upper
+  now shadows the whole subtree in the merged manifest — `rm -rf x && ln -s
+  t x` previously kept x/f.txt visible, so diff missed the deletion and
+  apply deadlocked forever on the non-empty dir (ENOTEMPTY).
+- macOS backend: `readlink` / `symlink` / `mknod` (regular files) are now
+  implemented — host symlinks were completely unusable in the FUSE-T view
+  (fuser defaults returned ENOSYS/EPERM, and readdir misreported symlinks
+  as regular files).
+- TOCTOU guard now also verifies symlink targets (not just "is still a
+  symlink") before overwriting — a host retarget between planning and
+  apply aborts instead of being silently replaced.
+- `diff --content` on a changed symlink reports the link-target change
+  instead of reading through to the (unrelated) target file contents.
+- Windows: creating a file under a lower symlink/junction parent is refused
+  (materializing the parent as a real directory in upper would flip its
+  kind and break apply).
+- Regression locks: symlink manifest round-trip (dangling/absolute/..-target)
+  and whiteout-vs-symlink folding.
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX

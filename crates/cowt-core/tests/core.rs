@@ -1407,8 +1407,6 @@ fn plan_repeat_idempotent_and_work_source_missing() {
     assert_eq!(fs::read_to_string(host.join("b.txt")).unwrap(), "v2");
     fs::remove_dir_all(&host).unwrap();
     fs::create_dir_all(&host).unwrap();
-    fs::remove_dir_all(&host).unwrap();
-    fs::create_dir_all(&host).unwrap();
 
     // Work source vanishes after planning: Phase-1 error names the work
     // path and the host stays untouched.
@@ -1426,5 +1424,159 @@ fn plan_repeat_idempotent_and_work_source_missing() {
         fs::read_to_string(host.join("a.txt")).unwrap(),
         "v1",
         "host must be untouched by a failed phase-1"
+    );
+}
+
+// ---------------------------------------------------------------- R27
+
+/// Round-27: a non-directory entry (symlink/file) replacing a base
+/// directory in upper must shadow the whole subtree — `rm -rf x && ln -s
+/// t x` leaves only the symlink, and x/f.txt is unreachable in the merged
+/// view. Without this, diff misses the deletion and apply deadlocks on the
+/// non-empty dir.
+#[cfg(unix)]
+#[test]
+fn overlay_symlink_replacing_dir_shadows_subtree() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let upper = tmp.path().join("upper");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&upper).unwrap();
+    write(&base, "x/f.txt", "base");
+    write(&base, "other.txt", "keep");
+    std::os::unix::fs::symlink("target-dir", upper.join("x")).unwrap();
+
+    let base_m = Manifest::scan(&base).unwrap().manifest;
+    let effective = overlay::effective_manifest(&base_m, &upper).unwrap();
+    assert!(
+        effective.get(Path::new("x/f.txt")).is_none(),
+        "base descendants under a replaced dir must be shadowed"
+    );
+    assert_eq!(
+        effective.get(Path::new("x")).unwrap().kind,
+        EntryKind::Symlink
+    );
+    // Siblings survive.
+    assert!(effective.get(Path::new("other.txt")).is_some());
+}
+
+/// Round-27: full chain — dir→symlink replacement in upper plans clean
+/// (subtree Delete + migration) and applies.
+#[cfg(unix)]
+#[test]
+fn apply_dir_replaced_by_symlink_chain() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let upper = tmp.path().join("upper");
+    for d in [&base, &host, &upper] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "x/f.txt", "base");
+    write(&host, "x/f.txt", "base");
+    std::os::unix::fs::symlink("target-dir", upper.join("x")).unwrap();
+
+    let base_m = Manifest::scan(&base).unwrap().manifest;
+    let host_m = Manifest::scan(&host).unwrap().manifest;
+    let work = overlay::effective_manifest(&base_m, &upper).unwrap();
+    let plan = merge::plan(&base_m, &host_m, &work, &upper);
+    assert!(
+        plan.is_clean(),
+        "dir->symlink replacement must plan clean: {:?}",
+        plan.conflicts
+    );
+    assert!(
+        plan.operations.iter().any(|op| matches!(
+            op,
+            merge::Operation::Delete { path, .. } if path == &PathBuf::from("x/f.txt")
+        )),
+        "the shadowed subtree must be deleted: {:?}",
+        plan.operations
+    );
+    merge::execute(&plan, &host).unwrap();
+    let meta = fs::symlink_metadata(host.join("x")).unwrap();
+    assert!(meta.file_type().is_symlink(), "x must become a symlink");
+    assert_eq!(
+        fs::read_link(host.join("x")).unwrap(),
+        std::path::PathBuf::from("target-dir")
+    );
+    assert!(!host.join("x/f.txt").exists(), "old subtree must be gone");
+}
+
+/// Round-27: diff --content on a retargeted symlink must not read through
+/// to the target files' contents (fs::read follows links) — it must report
+/// Binary or a link-semantic detail without touching targets.
+#[cfg(unix)]
+#[test]
+fn diff_content_does_not_read_through_symlinks() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let work = tmp.path().join("work");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    write(&base, "a.txt", "AAA-content");
+    write(&base, "b.txt", "BBB-content");
+    write(&work, "a.txt", "AAA-content");
+    write(&work, "b.txt", "BBB-content");
+    std::os::unix::fs::symlink("a.txt", base.join("l")).unwrap();
+    std::os::unix::fs::symlink("b.txt", work.join("l")).unwrap();
+
+    let (_, _, mut changes) = diff::diff_trees(&base, &work).unwrap();
+    let ch = changes
+        .iter_mut()
+        .find(|c| c.path == Path::new("l"))
+        .unwrap();
+    assert_eq!(ch.kind, diff::ChangeKind::Modified);
+    // enrich must not read through to a.txt/b.txt contents; a link-semantic
+    // detail (or Binary) is acceptable.
+    match ch.detail.as_ref().unwrap() {
+        diff::ContentDiff::Text { unified } => {
+            assert!(
+                !unified.contains("AAA-content") && !unified.contains("BBB-content"),
+                "symlink diff must not show target file contents:\n{unified}"
+            );
+        }
+        diff::ContentDiff::Binary => {}
+        other => panic!("unexpected detail for symlink: {other:?}"),
+    }
+}
+
+/// Round-27 regression lock: symlink manifest round-trip (dangling, absolute,
+/// relative-with-.. targets) and whiteout-vs-symlink fold.
+#[cfg(unix)]
+#[test]
+fn symlink_manifest_round_trip() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let upper = tmp.path().join("upper");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&upper).unwrap();
+    // Dangling, absolute and relative-with-.. targets all round-trip.
+    std::os::unix::fs::symlink("does-not-exist", base.join("dangling")).unwrap();
+    std::os::unix::fs::symlink("/etc/hosts", base.join("absolute")).unwrap();
+    std::os::unix::fs::symlink("../up", base.join("relup")).unwrap();
+    let bm = Manifest::scan(&base).unwrap().manifest;
+    for name in ["dangling", "absolute", "relup"] {
+        let e = bm.get(Path::new(name)).unwrap();
+        assert_eq!(e.kind, EntryKind::Symlink);
+        assert!(e.link_target.is_some());
+    }
+    let json = bm.to_json().unwrap();
+    let rt = Manifest::from_json(&json).unwrap();
+    assert_eq!(
+        rt.get(Path::new("dangling")).unwrap().link_target,
+        bm.get(Path::new("dangling")).unwrap().link_target
+    );
+
+    // A whiteout deleting a symlink folds the symlink out.
+    write(&base, "s", "irrelevant"); // placeholder not needed; symlink below
+    std::os::unix::fs::symlink("t", base.join("s")).unwrap();
+    let bm = Manifest::scan(&base).unwrap().manifest;
+    assert_eq!(bm.get(Path::new("s")).unwrap().kind, EntryKind::Symlink);
+    write(&upper, ".wh.s", "");
+    let effective = overlay::effective_manifest(&bm, &upper).unwrap();
+    assert!(
+        effective.get(Path::new("s")).is_none(),
+        "symlink whiteout must fold"
     );
 }

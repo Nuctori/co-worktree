@@ -14,7 +14,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use crate::error::Result;
-use crate::manifest::{Entry, Manifest};
+use crate::manifest::{Entry, EntryKind, Manifest};
 
 const WHITEOUT_PREFIX: &str = ".wh.";
 const OPAQUE_MARKER: &str = ".wh..wh..opq";
@@ -96,6 +96,15 @@ pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
             .unwrap_or(false);
         if wh_name && is_wh_prefixed_whiteout(&upper.join(&rel)) {
             continue;
+        }
+        // A non-directory entry replacing a base directory shadows the whole
+        // subtree: `rm -rf x && ln -s t x` leaves only the symlink in upper,
+        // and x/f.txt becomes unreachable in the merged view. Keep that
+        // overlayfs semantics — otherwise diff misses the deletion and apply
+        // deadlocks on the non-empty dir (round-27).
+        if entry.kind != EntryKind::Dir {
+            let prefix = rel.clone();
+            entries.retain(|p, _| !p.starts_with(&prefix));
         }
         entries.insert(rel, entry);
     }

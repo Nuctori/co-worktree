@@ -474,6 +474,109 @@ impl Filesystem for CowFs {
         }
     }
 
+    fn readlink(&mut self, _req: &Request<'_>, ino: u64, reply: ReplyData) {
+        // Round-27: symlinks were completely unusable in the view (fuser's
+        // default readlink returns ENOSYS, so every path resolution through
+        // a host symlink failed). Return the raw link target; the kernel
+        // resolves relative targets against the mount root, which mirrors
+        // the host tree at the same location, so semantics stay correct.
+        let rel = match self.inos.lock().unwrap().path_of(ino) {
+            Some(r) => r,
+            None => return reply.error(libc::ENOENT),
+        };
+        let path = match self.resolve(&rel) {
+            Some(p) => p,
+            None => return reply.error(libc::ENOENT),
+        };
+        match fs::read_link(&path) {
+            Ok(t) => {
+                use std::os::unix::ffi::OsStrExt;
+                reply.data(t.as_os_str().as_bytes());
+            }
+            Err(_) => reply.error(libc::EINVAL),
+        }
+    }
+
+    fn symlink(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        link_name: &OsStr,
+        target: &Path,
+        reply: ReplyEntry,
+    ) {
+        let Some(rel) = self
+            .inos
+            .lock()
+            .unwrap()
+            .path_of(parent)
+            .map(|p| p.join(link_name))
+        else {
+            return reply.error(libc::ENOENT);
+        };
+        self.clear_whiteout(&rel);
+        let dst = self.upper_of(&rel);
+        if let Some(p) = dst.parent() {
+            if let Err(e) = fs::create_dir_all(p) {
+                return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+            }
+        }
+        if let Err(e) = std::os::unix::fs::symlink(target, &dst) {
+            return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+        }
+        match self.attr_of(&rel) {
+            Ok(attr) => reply.entry(&ttl(), &attr, 0),
+            Err(_) => reply.error(libc::EIO),
+        }
+    }
+
+    fn mknod(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        mode: u32,
+        _rdev: u32,
+        reply: ReplyEntry,
+    ) {
+        // Round-27: only plain files (S_IFREG) are created via mknod by
+        // well-behaved tools (e.g. some POSIX wrappers). Devices/FIFOs are
+        // not supported in the isolated layer — refuse loudly instead of
+        // the fuser default ENOSYS.
+        const S_IFMT: u32 = 0o170000;
+        const S_IFREG: u32 = 0o100000;
+        if mode & S_IFMT != S_IFREG {
+            return reply.error(libc::EPERM);
+        }
+        let Some(rel) = self
+            .inos
+            .lock()
+            .unwrap()
+            .path_of(parent)
+            .map(|p| p.join(name))
+        else {
+            return reply.error(libc::ENOENT);
+        };
+        self.clear_whiteout(&rel);
+        let dst = self.upper_of(&rel);
+        if let Some(p) = dst.parent() {
+            if let Err(e) = fs::create_dir_all(p) {
+                return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+            }
+        }
+        if let Err(e) = fs::OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&dst)
+        {
+            return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+        }
+        match self.attr_of(&rel) {
+            Ok(attr) => reply.entry(&ttl(), &attr, 0),
+            Err(_) => reply.error(libc::EIO),
+        }
+    }
+
     fn rmdir(&mut self, _req: &Request<'_>, parent: u64, name: &OsStr, reply: ReplyEmpty) {
         self.unlink(_req, parent, name, reply)
     }

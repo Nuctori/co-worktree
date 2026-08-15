@@ -137,6 +137,24 @@ pub fn enrich(base_root: &Path, work_root: &Path, changes: &mut [Change]) {
 }
 
 fn content_detail(old: &Path, new: &Path) -> ContentDiff {
+    // A symlink change is a link-target change, not a content change:
+    // fs::read would follow the link and diff two unrelated target files.
+    // Report the targets themselves (round-27).
+    let is_link = |p: &Path| {
+        fs::symlink_metadata(p)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+    };
+    if is_link(old) || is_link(new) {
+        let old_t = fs::read_link(old).unwrap_or_default();
+        let new_t = fs::read_link(new).unwrap_or_default();
+        let unified = format!(
+            "--- base\n+++ worktree\n@@ -1 +1 @@\n-{}\n+{}\n",
+            old_t.display(),
+            new_t.display()
+        );
+        return ContentDiff::Text { unified };
+    }
     // Content enrichment loads both files fully; cap it so multi-GB files
     // cannot OOM the CLI. Structural diff still reports them as modified.
     const CONTENT_LIMIT: u64 = 64 * 1024 * 1024;

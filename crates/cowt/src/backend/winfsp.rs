@@ -434,6 +434,26 @@ impl CowFs {
         self.lower.join(rel)
     }
 
+    /// True if any ancestor of `rel` is a symlink/junction in the lower
+    /// (host) layer. Creating through such a parent would materialize it as
+    /// a real directory in upper, flipping its kind — refuse instead
+    /// (round-27, mirrors kernel merged-view semantics).
+    fn has_lower_link_parent(&self, rel: &Path) -> bool {
+        let mut cur = rel.parent();
+        while let Some(p) = cur {
+            if p.as_os_str().is_empty() {
+                break;
+            }
+            if fs::symlink_metadata(self.lower_of(p))
+                .map(|m| m.file_type().is_symlink())
+                .unwrap_or(false)
+            {
+                return true;
+            }
+            cur = p.parent();
+        }
+        false
+    }
     /// True if `rel` or any of its ancestors is whiteouted in upper: a
     /// directory whiteout shadows the whole subtree beneath it.
     fn is_shadowed(&self, rel: &Path) -> bool {
@@ -784,6 +804,13 @@ impl FileSystemContext for CowFs {
             return Err(FspError::IO(ErrorKind::PermissionDenied));
         }
         let dst = self.upper_of(&rel);
+        // Round-27: creating under a lower symlink/junction parent would
+        // materialize the parent as a REAL directory in upper (flipping its
+        // kind), and apply could then not migrate it — refuse loudly like
+        // the kernel does for writes through symlinks in a merged view.
+        if self.has_lower_link_parent(&rel) {
+            return Err(FspError::IO(ErrorKind::PermissionDenied));
+        }
         // A leftover whiteout (delete-then-recreate) must not shadow the
         // freshly created entry.
         self.clear_whiteout(&rel);

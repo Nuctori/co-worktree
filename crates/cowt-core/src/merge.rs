@@ -570,7 +570,12 @@ fn verify_unchanged(plan: &MergePlan, target_root: &Path, rel: &Path) -> Result<
             meta.is_file() && meta.len() == expected.size && mtime_ns == expected.mtime_ns
         }
         EntryKind::Dir => meta.is_dir(),
-        EntryKind::Symlink => meta.file_type().is_symlink(),
+        EntryKind::Symlink => {
+            // Check the target too: a retargeted link would be silently
+            // overwritten otherwise (round-27, mirrors the File branch).
+            meta.file_type().is_symlink()
+                && fs::read_link(&dest).ok().as_deref() == expected.link_target.as_deref()
+        }
     };
     if !unchanged {
         return Err(Error::io(
