@@ -1368,3 +1368,82 @@ fn e2e_case_recreate() {
     );
     env.cowt_ok(&["drop", &id]);
 }
+
+/// Adversarial: binary content round-trip. A binary file (NULs, 0xFF,
+/// invalid UTF-8) modified through the view must diff as binary, apply
+/// byte-exactly, and never panic or corrupt --json output. Also: ANSI
+/// escape sequences in a text file must not reach the terminal raw
+/// (sanitized in human diff output).
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_binary_and_ansi_safety() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let app = env.app_dir("binapp");
+    fs::create_dir_all(&app).unwrap();
+    let mut seed: Vec<u8> = (0..200).collect(); // includes NUL, 0x80-0xC7 invalid UTF-8
+    seed.push(0xFF);
+    fs::write(app.join("blob.bin"), &seed).unwrap();
+    fs::write(app.join("ansi.txt"), "line1\nline2\n").unwrap();
+    env.cowt_ok(&["fork", app.to_str().unwrap(), "--name", "binapp"]);
+    let id = env.worktree_id("binapp");
+
+    let mut sleeper = spawn_sleeper(&env, &id, 6);
+    // Modify the binary (more invalid bytes) and inject ANSI into text.
+    let mut new_blob = seed.clone();
+    new_blob.extend_from_slice(&[0x00, 0x1B, 0x5B, 0x33, 0x31, 0x6D]); // ESC[31m
+    new_blob.push(0xFE);
+    fs::write(app.join("blob.bin"), &new_blob).unwrap();
+    // Control bytes only (0x01...) are NOT text: must classify as binary,
+    // so the ESC above would be binary too. Use a text file with ESC inside
+    // a line beyond a NUL-free prefix to exercise the sanitizer.
+    fs::write(
+        app.join("ansi.txt"),
+        "line1\nline2 ESC[\u{1b}31m INJECTED\n",
+    )
+    .unwrap();
+    wait_run(&mut sleeper);
+    assert_mount_gone(&app);
+
+    // diff --json + --content: binary classified, JSON stays valid.
+    let json = env.cowt_ok(&["diff", &id, "--json", "--content"]);
+    let v: Value =
+        serde_json::from_str(&json).unwrap_or_else(|e| panic!("diff --json invalid: {e}\n{json}"));
+    let v = v.as_array().unwrap();
+    let blob = v.iter().find(|c| c["path"] == "blob.bin").unwrap();
+    assert_eq!(blob["kind"], "modified");
+    assert_eq!(
+        blob["detail"]["type"], "binary",
+        "blob must classify as binary"
+    );
+
+    // Human diff: ESC-bearing content classifies as binary (first line of
+    // defense) and no raw ESC byte reaches stdout.
+    let out = env
+        .cowt()
+        .args(["diff", &id, "--content"])
+        .output()
+        .unwrap();
+    let stdout = out.stdout.to_vec();
+    assert!(
+        !stdout.contains(&0x1B),
+        "raw ESC leaked into diff output: {stdout:?}"
+    );
+    assert!(
+        String::from_utf8_lossy(&stdout).contains("binary content changed"),
+        "ESC file must classify as binary: {}",
+        String::from_utf8_lossy(&stdout)
+    );
+
+    // apply: host bytes must equal the worktree bytes exactly.
+    env.cowt_ok(&["apply", &id]);
+    let host_blob = fs::read(app.join("blob.bin")).unwrap();
+    assert_eq!(host_blob, new_blob, "binary apply must be byte-exact");
+    assert_eq!(
+        fs::read_to_string(app.join("ansi.txt")).unwrap(),
+        "line1\nline2 ESC[\u{1b}31m INJECTED\n"
+    );
+    env.cowt_ok(&["drop", &id]);
+}

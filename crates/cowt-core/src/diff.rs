@@ -136,6 +136,17 @@ pub fn enrich(base_root: &Path, work_root: &Path, changes: &mut [Change]) {
 }
 
 fn content_detail(old: &Path, new: &Path) -> ContentDiff {
+    // Content enrichment loads both files fully; cap it so multi-GB files
+    // cannot OOM the CLI. Structural diff still reports them as modified.
+    const CONTENT_LIMIT: u64 = 64 * 1024 * 1024;
+    let ok_size = |p: &Path| {
+        fs::metadata(p)
+            .map(|m| m.len() <= CONTENT_LIMIT)
+            .unwrap_or(true)
+    };
+    if !ok_size(old) || !ok_size(new) {
+        return ContentDiff::Binary;
+    }
     let old_bytes = match fs::read(old) {
         Ok(b) => b,
         Err(_) => return ContentDiff::Binary,
@@ -158,9 +169,15 @@ fn content_detail(old: &Path, new: &Path) -> ContentDiff {
     }
 }
 
-/// Heuristic text detection: no NUL byte in the first 8 KiB.
+/// Heuristic text detection: no NUL byte and no C0 control characters
+/// (other than tab/CR/LF) in the first 8 KiB. Control bytes are not text;
+/// treating them as such would leak raw ANSI escape sequences into the
+/// terminal via the human diff output.
 fn is_text(s: &str) -> bool {
-    !s.as_bytes().iter().take(8192).any(|b| *b == 0)
+    !s.as_bytes()
+        .iter()
+        .take(8192)
+        .any(|b| *b == 0 || (*b < 0x20 && !matches!(*b, b'\t' | b'\n' | b'\r')))
 }
 
 /// Unified line diff using the Myers algorithm.

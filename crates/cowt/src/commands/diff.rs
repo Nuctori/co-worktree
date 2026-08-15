@@ -79,6 +79,20 @@ pub fn diff_cmd(args: DiffArgs) -> Result<()> {
     Ok(())
 }
 
+/// Terminal-safe rendering: control bytes (other than tab/CR/LF) become U+FFFD
+/// so hostile file contents cannot inject ANSI/OSC sequences via diff output.
+fn sanitize(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() && !matches!(c, '\t' | '\n' | '\r') {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 fn print_human(changes: &[Change], stat: bool) {
     if changes.is_empty() {
         println!("no changes");
@@ -105,7 +119,7 @@ fn print_human(changes: &[Change], stat: bool) {
             match &ch.detail {
                 Some(ContentDiff::Text { unified }) => {
                     for line in unified.lines() {
-                        println!("    {line}");
+                        println!("    {}", sanitize(line));
                     }
                 }
                 Some(ContentDiff::Keys { changes }) => {
@@ -116,9 +130,18 @@ fn print_human(changes: &[Change], stat: bool) {
                             ChangeKind::Deleted => "-",
                         };
                         match (&k.old, &k.new) {
-                            (Some(o), Some(n)) => println!("    {t} {}: {o} -> {n}", k.key),
-                            (None, Some(n)) => println!("    {t} {}: {n}", k.key),
-                            (Some(o), None) => println!("    {t} {}: (was {o})", k.key),
+                            (Some(o), Some(n)) => println!(
+                                "    {t} {}: {} -> {}",
+                                sanitize(&k.key),
+                                sanitize(o),
+                                sanitize(n)
+                            ),
+                            (None, Some(n)) => {
+                                println!("    {t} {}: {}", sanitize(&k.key), sanitize(n))
+                            }
+                            (Some(o), None) => {
+                                println!("    {t} {}: (was {})", sanitize(&k.key), sanitize(o))
+                            }
                             _ => {}
                         }
                     }
@@ -129,4 +152,16 @@ fn print_human(changes: &[Change], stat: bool) {
         }
     }
     println!("summary: {a} added, {m} modified, {d} deleted");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::sanitize;
+
+    #[test]
+    fn sanitize_strips_control_bytes_keeps_text() {
+        assert_eq!(sanitize("a\tb\nc"), "a\tb\nc");
+        assert_eq!(sanitize("x\u{1b}[31mred"), "x\u{FFFD}[31mred");
+        assert_eq!(sanitize("ok \u{0} nul"), "ok \u{FFFD} nul");
+    }
 }
