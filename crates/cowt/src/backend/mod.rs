@@ -651,9 +651,13 @@ mod pidfile_tests {
         std::fs::write(&pf, format!("{}:1", std::process::id())).unwrap();
         write_pidfile(&pf, std::process::id()).unwrap();
         let body = std::fs::read_to_string(&pf).unwrap();
+        // Replaced with our pid (with starttime when the platform provides
+        // one; plain pid otherwise).
+        let ok = body == std::process::id().to_string()
+            || body.starts_with(&format!("{}:", std::process::id()));
         assert!(
-            body.starts_with(&format!("{}:", std::process::id())),
-            "recycled pidfile must be replaced with our pid:starttime, got {body}"
+            ok,
+            "recycled pidfile must be replaced with our pid, got {body}"
         );
     }
 
