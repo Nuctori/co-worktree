@@ -233,6 +233,23 @@ impl CowFs {
         Ok(())
     }
 
+    /// Remove the whiteout for `rel`, if any (case-insensitively).
+    fn clear_whiteout(&self, rel: &Path) {
+        let (parent, name) = (rel.parent().unwrap_or(Path::new("")), rel.file_name());
+        let Some(name) = name else { return };
+        let needle = name.to_string_lossy().to_lowercase();
+        if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
+            for e in rd.flatten() {
+                let n = e.file_name();
+                let s = n.to_string_lossy();
+                if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
+                    if victim.to_lowercase() == needle {
+                        let _ = fs::remove_file(e.path());
+                    }
+                }
+            }
+        }
+    }
     /// FUSE attributes for a merged path.
     fn attr_of(&self, rel: &Path) -> io::Result<FileAttr> {
         let path = self
@@ -380,31 +397,12 @@ impl Filesystem for CowFs {
             return reply.error(libc::ENOENT);
         };
         self.clear_whiteout(&rel);
-        self.clear_whiteout(&rel);
         if let Err(e) = fs::create_dir_all(self.upper_of(&rel)) {
             return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
         }
         match self.attr_of(&rel) {
             Ok(attr) => reply.entry(&ttl(), &attr, 0),
             Err(_) => reply.error(libc::EIO),
-        }
-    }
-
-    /// Remove the whiteout for `rel`, if any (case-insensitively).
-    fn clear_whiteout(&self, rel: &Path) {
-        let (parent, name) = (rel.parent().unwrap_or(Path::new("")), rel.file_name());
-        let Some(name) = name else { return };
-        let needle = name.to_string_lossy().to_lowercase();
-        if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
-            for e in rd.flatten() {
-                let n = e.file_name();
-                let s = n.to_string_lossy();
-                if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
-                    if victim.to_lowercase() == needle {
-                        let _ = fs::remove_file(e.path());
-                    }
-                }
-            }
         }
     }
 
