@@ -289,9 +289,9 @@ mod tests {
                 .spawn()
                 .unwrap();
             let pid = child.id();
-            unsafe {
-                libc::kill(pid as i32, libc::SIGKILL);
-            }
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .status();
             let _ = child.wait();
             assert!(!pid_alive(pid));
         }
