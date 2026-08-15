@@ -1584,7 +1584,9 @@ fn symlink_manifest_round_trip() {
 
 /// Round-29: a non-UTF-8 filename must be SKIPPED with a warning (not
 /// hard-fail the whole scan/serialization) — fork/apply keep working.
-#[cfg(unix)]
+/// Linux-only: macOS APFS refuses to even create such a name (EILSEQ), and
+/// ext4 is the filesystem where the bytes are representable.
+#[cfg(target_os = "linux")]
 #[test]
 fn scan_skips_non_utf8_filenames_with_warning() {
     use std::ffi::OsStr;
@@ -1617,9 +1619,28 @@ fn scan_skips_non_utf8_filenames_with_warning() {
     assert!(json.contains("ok.txt"));
 }
 
+/// Round-29: on macOS, the manifest key is NFC-canonicalized even when the
+/// file was created with an NFD spelling — so a later NFC-spelled deletion
+/// matches the whiteout (APFS itself stores one file regardless).
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_scan_canonicalizes_keys_to_nfc() {
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    fs::create_dir_all(&d).unwrap();
+    write(&d, "cafe\u{301}.txt", "nfd"); // NFD spelling
+    let m = Manifest::scan(&d).unwrap().manifest;
+    assert_eq!(m.entries.len(), 1);
+    // The key must be the NFC form ("café" = U+00E9), not NFD.
+    assert!(m.get(Path::new("caf\u{e9}.txt")).is_some());
+    assert!(m.get(Path::new("cafe\u{301}.txt")).is_none());
+}
+
 /// Round-29: NFC and NFD spellings of the same name are distinct byte keys
-/// on Linux (ext4 normalization-sensitive) — locking that semantics.
-#[cfg(unix)]
+/// on Linux (ext4 normalization-sensitive) — locking that semantics. On
+/// macOS, APFS stores them as one file and cowt NFC-canonicalizes keys, so
+/// the "two keys" behavior is Linux-specific.
+#[cfg(target_os = "linux")]
 #[test]
 fn nfc_nfd_are_distinct_keys_on_unix() {
     let tmp = TempDir::new().unwrap();
