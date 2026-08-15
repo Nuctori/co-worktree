@@ -419,6 +419,14 @@ impl Filesystem for CowFs {
         }
     }
 
+    fn mkdir(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        reply: ReplyEntry,
     ) {
         let Some(rel) = self
             .inos
@@ -716,6 +724,15 @@ impl Filesystem for CowFs {
         reply.ok();
     }
 
+    fn create(
+        &mut self,
+        _req: &Request<'_>,
+        parent: u64,
+        name: &OsStr,
+        _mode: u32,
+        _umask: u32,
+        flags: i32,
+        reply: ReplyCreate,
     ) {
         let Some(rel) = self
             .inos

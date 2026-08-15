@@ -647,7 +647,10 @@ fn unified_diff_lone_cr_terminates_lines() {
     let u = diff::unified_diff("a\nb\r", "a\nc\r");
     assert!(u.lines().any(|l| l == "-b"), "deleted line lost:\n{u}");
     assert!(u.lines().any(|l| l == "+c"), "added line lost:\n{u}");
-    assert!(!u.contains('\r'), "lone CR leaked into unified output:\n{u}");
+    assert!(
+        !u.contains('\r'),
+        "lone CR leaked into unified output:\n{u}"
+    );
 }
 
 /// Round-21: corrupted manifests with an empty/garbage hash must fail loudly
@@ -683,7 +686,10 @@ fn diff_line_endings_regressions() {
     write(&base, "a.txt", "l1\r\nl2\r\nl3\r\n");
     write(&work, "a.txt", "l1\r\nl2x\r\nl3\r\n");
     let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
-    let ch = changes.iter().find(|c| c.path == Path::new("a.txt")).unwrap();
+    let ch = changes
+        .iter()
+        .find(|c| c.path == Path::new("a.txt"))
+        .unwrap();
     match ch.detail.as_ref().unwrap() {
         diff::ContentDiff::Text { unified } => {
             assert!(unified.contains("+l2x"), "minimal hunk missing:\n{unified}");
@@ -696,7 +702,10 @@ fn diff_line_endings_regressions() {
     write(&base, "b.txt", "l1\nl2\nl3\n");
     write(&work, "b.txt", "l1\r\nl2\r\nl3\r\n");
     let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
-    let ch = changes.iter().find(|c| c.path == Path::new("b.txt")).unwrap();
+    let ch = changes
+        .iter()
+        .find(|c| c.path == Path::new("b.txt"))
+        .unwrap();
     assert_eq!(ch.kind, diff::ChangeKind::Modified);
     match ch.detail.as_ref().unwrap() {
         diff::ContentDiff::Text { unified } => {
@@ -712,7 +721,10 @@ fn diff_line_endings_regressions() {
     write(&base, "c.txt", "a\nb");
     write(&work, "c.txt", "a\nb\n");
     let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
-    let ch = changes.iter().find(|c| c.path == Path::new("c.txt")).unwrap();
+    let ch = changes
+        .iter()
+        .find(|c| c.path == Path::new("c.txt"))
+        .unwrap();
     match ch.detail.as_ref().unwrap() {
         diff::ContentDiff::Text { unified } => {
             assert!(
@@ -727,7 +739,10 @@ fn diff_line_endings_regressions() {
     write(&base, "d.txt", "x\n");
     write(&work, "d.txt", "\u{feff}x\n");
     let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
-    let ch = changes.iter().find(|c| c.path == Path::new("d.txt")).unwrap();
+    let ch = changes
+        .iter()
+        .find(|c| c.path == Path::new("d.txt"))
+        .unwrap();
     match ch.detail.as_ref().unwrap() {
         diff::ContentDiff::Text { unified } => {
             assert!(
@@ -742,7 +757,10 @@ fn diff_line_endings_regressions() {
     write(&base, "e.txt", "l1\nl2\rl3\n");
     write(&work, "e.txt", "l1\nl2X\rl3\n");
     let (_, _, changes) = diff::diff_trees(&base, &work).unwrap();
-    let ch = changes.iter().find(|c| c.path == Path::new("e.txt")).unwrap();
+    let ch = changes
+        .iter()
+        .find(|c| c.path == Path::new("e.txt"))
+        .unwrap();
     match ch.detail.as_ref().unwrap() {
         diff::ContentDiff::Text { unified } => {
             assert!(unified.contains("l2X"), "changed line missing:\n{unified}");
@@ -801,8 +819,7 @@ fn empty_file_boundaries() {
     assert!(
         plan.conflicts
             .iter()
-            .any(|c| c.path == Path::new("e.txt")
-                && c.kind == merge::ConflictKind::DeleteVsModify),
+            .any(|c| c.path == Path::new("e.txt") && c.kind == merge::ConflictKind::DeleteVsModify),
         "empty-file delete-vs-modify must conflict: {:?}",
         plan.conflicts
     );
