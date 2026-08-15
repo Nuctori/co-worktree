@@ -1318,7 +1318,10 @@ fn e2e_case_recreate() {
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
     assert_eq!(
-        upper_files.iter().filter(|n| n.to_lowercase() == "cache.bin").count(),
+        upper_files
+            .iter()
+            .filter(|n| n.to_lowercase() == "cache.bin")
+            .count(),
         1,
         "no ghost entries in upper after apply: {upper_files:?}"
     );
