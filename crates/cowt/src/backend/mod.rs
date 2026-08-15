@@ -4,6 +4,7 @@
 //! view is platform specific. Each supported platform ships one backend.
 
 use std::path::Path;
+use std::sync::atomic::{AtomicI32, Ordering};
 
 use anyhow::Result;
 
@@ -16,6 +17,101 @@ pub mod unsupported;
 #[cfg(target_os = "windows")]
 pub mod winfsp;
 
+/// Pid of the isolated child, registered while `run_isolated` is executing.
+/// Used by the signal handler to forward SIGTERM/SIGINT (round-26): without
+/// forwarding, killing `cowt run` orphans the child, which keeps holding
+/// the mount and the pidfile.
+static CHILD_PID: AtomicI32 = AtomicI32::new(0);
+
+/// Register the SIGTERM/SIGINT forwarding handler (unix). The handler is
+/// async-signal-safe: it only kills the child (escalating to SIGKILL, since
+/// the child may trap TERM/INT) and lets the normal wait/teardown path run.
+#[cfg(unix)]
+pub(crate) fn install_signal_forwarding() {
+    extern "C" fn forward(sig: libc::c_int) {
+        let pid = CHILD_PID.load(Ordering::Relaxed);
+        if pid > 0 {
+            // First deliver the same signal (graceful), then escalate to
+            // SIGKILL if the child traps it.
+            unsafe {
+                libc::kill(pid, sig);
+                libc::alarm(3);
+            }
+        }
+    }
+    extern "C" fn escalate(_: libc::c_int) {
+        let pid = CHILD_PID.load(Ordering::Relaxed);
+        if pid > 0 {
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+    unsafe {
+        // Casting a fn item to libc::sighandler_t is inherent to signal
+        // registration; rustc's fn_to_numeric_cast has no cleaner form.
+        #[allow(clippy::fn_to_numeric_cast)]
+        libc::signal(libc::SIGTERM, forward as *const () as libc::sighandler_t);
+        #[allow(clippy::fn_to_numeric_cast)]
+        libc::signal(libc::SIGINT, forward as *const () as libc::sighandler_t);
+        #[allow(clippy::fn_to_numeric_cast)]
+        libc::signal(libc::SIGALRM, escalate as *const () as libc::sighandler_t);
+    }
+}
+/// Register Ctrl-C/Ctrl-Break forwarding (Windows): the handler terminates
+/// the child so the normal wait/teardown path can restore the host.
+#[cfg(windows)]
+pub(crate) fn install_signal_forwarding() {
+    extern "system" fn handler(_ctrl: u32) -> windows::core::BOOL {
+        let pid = CHILD_PID.load(Ordering::Relaxed);
+        if pid > 0 {
+            use windows::Win32::System::Threading::{
+                OpenProcess, TerminateProcess, PROCESS_TERMINATE,
+            };
+            if let Ok(h) = unsafe { OpenProcess(PROCESS_TERMINATE, false, pid as u32) } {
+                let _ = unsafe { TerminateProcess(h, 1) };
+            }
+        }
+        windows::core::BOOL(1) // handled: let the main thread reap and tear down
+    }
+    unsafe {
+        use windows::Win32::System::Console::SetConsoleCtrlHandler;
+        let _ = SetConsoleCtrlHandler(Some(handler), true);
+    }
+}
+
+/// Register the child pid with the forwarding handler; returns a guard that
+/// clears it on drop (so a stale pid is never signalled).
+pub(crate) struct ChildSignalGuard;
+
+impl ChildSignalGuard {
+    pub fn track(pid: u32) -> Self {
+        CHILD_PID.store(pid as i32, Ordering::Relaxed);
+        ChildSignalGuard
+    }
+}
+
+impl Drop for ChildSignalGuard {
+    fn drop(&mut self) {
+        CHILD_PID.store(0, Ordering::Relaxed);
+        #[cfg(unix)]
+        unsafe {
+            libc::alarm(0); // cancel any pending escalation
+        }
+    }
+}
+
+/// Kill every process still in the child's process group (unix). Used after
+/// the direct child exits to reap grandchildren that inherited the view
+/// (e.g. backgrounded processes holding the mount cwd), which would
+/// otherwise make the unmount fail with EBUSY and deadlock drop --force
+/// (round-26).
+#[cfg(unix)]
+pub(crate) fn kill_child_process_group(pid: u32) {
+    unsafe {
+        libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+}
 /// A virtual filesystem backend: mounts a merged view whose writes are
 /// redirected to an isolated upper layer.
 pub trait Backend: Send + Sync {
@@ -59,7 +155,16 @@ pub trait Backend: Send + Sync {
         pidfile: &Path,
     ) -> Result<(i32, String)> {
         let mut guard = self.mount(lower, upper, work, mountpoint)?;
-        let mut child = match std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
+        let mut cmd_ = std::process::Command::new(&cmd[0]);
+        cmd_.args(&cmd[1..]);
+        // Own process group (unix): lets us reap stray grandchildren that
+        // inherited the view before unmounting (round-26).
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            cmd_.process_group(0);
+        }
+        let mut child = match cmd_.spawn() {
             Ok(c) => c,
             Err(e) => {
                 // The mount is up and the host dir sits in `real`: tear the
@@ -69,6 +174,13 @@ pub trait Backend: Send + Sync {
                 // strand the host directory in `real`).
                 if let Err(te) = guard.teardown() {
                     eprintln!("cowt: warning: unmount failed: {te:#}");
+                }
+                // Shell convention: 127 = command not found, 126 = not
+                // executable (round-26) — scripts distinguish "missing"
+                // from "failed".
+                if let Some(code) = spawn_error_code(&e) {
+                    eprintln!("cowt: cannot run '{}': {e}", cmd[0]);
+                    return Ok((code, format!("failed to start '{}'", cmd[0])));
                 }
                 return Err(anyhow::anyhow!("spawn '{}': {e}", cmd[0]));
             }
@@ -81,7 +193,15 @@ pub trait Backend: Send + Sync {
                 return Err(anyhow::anyhow!("{e}"));
             }
         }
+        // Forward SIGTERM/SIGINT to the child so killing `cowt run` never
+        // orphans it (round-26). Cleared when the guard drops below.
+        let _sig = ChildSignalGuard::track(child.id());
         let result = child.wait();
+        // Reap stray grandchildren (backgrounded processes that kept the
+        // view's cwd / open files) before unmounting — otherwise the unmount
+        // fails with EBUSY and drop --force deadlocks (round-26).
+        #[cfg(unix)]
+        kill_child_process_group(child.id());
         // Kernel overlayfs renames a lower directory lazily: upper/ holds the
         // renamed dir but its children stay un-materialized (resolved through
         // lower while mounted). Materialize them while the view is still
@@ -117,6 +237,17 @@ pub(crate) fn exit_code_and_desc(status: &std::process::ExitStatus) -> (i32, Str
         status.code().unwrap_or(1),
         format!("exited with code {}", status.code().unwrap_or(1)),
     )
+}
+
+/// Shell-convention exit codes for spawn failures: 127 = command not found,
+/// 126 = found but not executable (round-26). Other errors are reported as
+/// the process-level failure (1) by the caller.
+pub(crate) fn spawn_error_code(e: &std::io::Error) -> Option<i32> {
+    match e.kind() {
+        std::io::ErrorKind::NotFound => Some(127),
+        std::io::ErrorKind::PermissionDenied => Some(126),
+        _ => None,
+    }
 }
 
 /// After a run, kernel overlayfs may have lazily copied up a renamed lower

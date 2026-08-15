@@ -40,7 +40,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
         .with_context(|| format!("create upper layer {}", upper.display()))?;
     fs::create_dir_all(&work).with_context(|| format!("create work layer {}", work.display()))?;
     let pidfile = dir.join("run.pid");
-    let code = backend.run_isolated(
+    let result = backend.run_isolated(
         &meta.target,
         &upper,
         &work,
@@ -48,8 +48,21 @@ pub fn run(args: RunArgs) -> Result<i32> {
         &args.cmd,
         &pidfile,
     );
-    State::clear_running(&dir);
-    let (code, desc) = code?;
+    let (code, desc) = result?;
+    // Only clear the pidfile when the run is fully done AND the mount is
+    // down: on failure the pidfile may still describe a live child, and a
+    // surviving mount (stray grandchild) must keep the stale marker so
+    // `drop --force` recognizes it as ours instead of a foreign mount
+    // (round-26/round-23: R26-07 moved the clear after `code?`).
+    if !default_backend().is_mounted(&meta.target) {
+        State::clear_running(&dir);
+    } else {
+        eprintln!(
+            "cowt: warning: {} is still mounted after the run; \
+             the worktree keeps its run.pid marker so `cowt drop --force` can clean it up",
+            meta.target.display()
+        );
+    }
     // The moved-aside host dir must be back. If it is not (e.g. the macOS
     // mountpoint symlink was removed externally), say so loudly and force a
     // non-zero exit — a script must be able to tell that the worktree is in

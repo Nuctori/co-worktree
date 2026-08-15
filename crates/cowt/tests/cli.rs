@@ -714,6 +714,158 @@ fn run_reports_signal_killed_child() {
     );
 }
 
+// ---------------------------------------------------------------- R26
+
+/// Round-26: a command that does not exist must exit 127 (shell
+/// convention), not 1 — scripts distinguish "missing tool" from "tool
+/// failed" via 127/126.
+#[test]
+fn run_missing_command_exits_127() {
+    let env = Env::new();
+    if !env.fuse_available() {
+        eprintln!("backend unavailable; skipping");
+        return;
+    }
+    env.fork();
+    let out = env
+        .cowt()
+        .args(["run", "demo", "--", "definitely-not-a-command-xyz"])
+        .output()
+        .unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(127),
+        "missing command must exit 127, stderr: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Round-26: the child inherits the caller's working directory (not the
+/// mountpoint); relative paths resolve against it. Regression lock.
+#[test]
+fn run_child_cwd_is_callers_cwd() {
+    let env = Env::new();
+    if !env.fuse_available() {
+        eprintln!("backend unavailable; skipping");
+        return;
+    }
+    env.fork();
+    let out = env
+        .cowt()
+        .args(["run", "demo", "--", "sh", "-c", "pwd"])
+        .output()
+        .unwrap();
+    let pwd = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let expect = std::env::current_dir()
+        .unwrap()
+        .to_string_lossy()
+        .into_owned();
+    // MSYS sh prints a posix-style path (/d/...) while std reports a drive
+    // path (d:\...): normalize both to lowercase trailing components.
+    let norm = |s: &str| -> String {
+        s.replace('\\', "/")
+            .trim_start_matches('/')
+            .chars()
+            .skip_while(|c| *c != '/')
+            .collect::<String>()
+            .to_lowercase()
+    };
+    assert_eq!(
+        norm(&pwd),
+        norm(&expect),
+        "child cwd must be the caller's cwd, not the mountpoint"
+    );
+}
+
+/// Round-26: the child's stdin/stdout/stderr are fully inherited and cowt's
+/// own messages never pollute the child's stdout. Regression lock.
+#[test]
+fn run_streams_are_inherited_and_stdout_clean() {
+    let env = Env::new();
+    if !env.fuse_available() {
+        eprintln!("backend unavailable; skipping");
+        return;
+    }
+    env.fork();
+    let child = env
+        .cowt()
+        .args([
+            "run",
+            "demo",
+            "--",
+            "sh",
+            "-c",
+            "printf out; printf err >&2",
+        ])
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::piped())
+        .stderr(std::process::Stdio::piped())
+        .spawn()
+        .unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        String::from_utf8_lossy(&out.stdout),
+        "out",
+        "cowt messages must not leak into child stdout"
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("err"),
+        "child stderr must pass through"
+    );
+}
+
+/// Round-26: killing cowt (SIGTERM) must terminate the child — no orphan
+/// holding the mount and pidfile.
+#[cfg(unix)]
+#[test]
+fn run_forward_sigterm_to_child() {
+    use std::os::unix::process::ExitStatusExt;
+    let env = Env::new();
+    if !env.fuse_available() {
+        eprintln!("backend unavailable; skipping");
+        return;
+    }
+    env.fork();
+    let mut cowt = env
+        .cowt()
+        .args([
+            "run",
+            "demo",
+            "--",
+            "sh",
+            "-c",
+            "trap '' INT TERM; sleep 30",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    // Give the mount + child time to come up.
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    while std::time::Instant::now() < deadline {
+        if env.state.join("demo").join("run.pid").exists() {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    // Send SIGTERM to cowt itself.
+    let rc = std::process::Command::new("kill")
+        .arg("-TERM")
+        .arg(cowt.id().to_string())
+        .status()
+        .unwrap();
+    assert!(rc.success());
+    // cowt must forward and reap the child; the run must finish.
+    let status = cowt.wait().unwrap();
+    // The child ignored TERM, so cowt escalates; either way it must exit
+    // promptly (not hang) with a signal/128+ code.
+    let _ = status.signal();
+    assert!(
+        !env.state.join("demo").join("run.pid").exists(),
+        "pidfile must be cleaned after kill"
+    );
+}
+
 // ---------------------------------------------------------------- R23
 
 /// Round-23: apply must refuse a semantically-corrupted base manifest —

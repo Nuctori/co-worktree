@@ -119,6 +119,12 @@ Windows cross-compile check, release builds for all three.
 
 - **Not a sandbox**: no CPU, memory, network, or IPC limits; not malware
   protection — side-effect isolation only
+- **Child process semantics of `cowt run`**: the child inherits the
+  caller's environment, working directory and stdin/stdout/stderr (relative
+  paths in the command resolve against the caller's cwd, not the
+  mountpoint); its exit code is passed through (127 = command not found).
+  SIGTERM/SIGINT sent to `cowt` are forwarded to the child. No `COWT_*`
+  variables are visible inside the child.
 - **User-level directories only**: paths outside `$HOME` are refused by
   default (`--force-path` overrides)
 - **Windows registry**: not isolated (MVP: file-level config only)

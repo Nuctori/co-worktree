@@ -159,6 +159,26 @@ All notable changes to co-worktree are documented here.
   children), plan re-execution idempotency, and work-source-missing error
   paths.
 
+### Added — round 26 (run process semantics: env / cwd / signals / exit codes)
+
+- userns mode no longer leaks `COWT_LOWER` (the host directory path) and
+  the other internal mount variables into the child's environment — the
+  isolation bypass is no longer handed out via `$COWT_LOWER`.
+- `SIGTERM`/`SIGINT` sent to `cowt run` are now forwarded to the isolated
+  child (escalating to SIGKILL if the child traps them), and the child runs
+  in its own process group so stray grandchildren holding the view are
+  reaped before unmount — killing cowt no longer orphans a process that
+  keeps the mount (and deadlocks `drop --force` on an EBUSY unmount).
+- The pidfile is only cleared once the mount is actually down; a surviving
+  mount keeps the stale marker so `drop --force` recognizes it as our own
+  leftover instead of a foreign mount.
+- Missing commands exit 127 (shell convention) instead of 1, so scripts can
+  distinguish "tool missing" from "tool failed".
+- Child process semantics documented in the README (cwd, env, streams,
+  signal forwarding) and locked by regression tests.
+- Note: `cowt run` has no timeout by design — the child runs until it
+  exits.
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX

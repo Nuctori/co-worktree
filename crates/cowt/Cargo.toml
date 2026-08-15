@@ -25,6 +25,9 @@ serde_json.workspace = true
 # report availability instead of failing at startup.
 # Note: winfsp/winfsp-sys are GPL-3.0; the WinFsp DLL itself is GPLv3 with a
 # FLOSS linking exception (see README "License" note).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(windows)'.dependencies]
 winfsp = { version = "0.12", default-features = false, features = [
   "delayload",

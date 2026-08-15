@@ -128,9 +128,12 @@ fn with_probe_dirs(f: impl Fn(&Path, &Path, &Path, &Path) -> bool) -> bool {
 }
 
 /// Shell wrapper executed inside the user namespace: mount, then exec the
-/// user command (`"$@"`).
+/// user command (`"$@"`). The COWT_* variables are internal plumbing for
+/// the mount step; they must not leak into the child's environment (the
+/// lower dir is the host directory itself — round-26).
 const WRAPPER: &str = r#"set -e
 mount -t overlay overlay -o "lowerdir=$COWT_LOWER,upperdir=$COWT_UPPER,workdir=$COWT_WORK" "$COWT_MNT"
+unset COWT_LOWER COWT_UPPER COWT_WORK COWT_MNT
 exec "$@""#;
 
 impl FuseOverlayfs {
@@ -167,10 +170,30 @@ impl FuseOverlayfs {
             mountpoint.display(),
             upper.display()
         );
-        let mut child = Command::new(&cmd[0])
-            .args(&cmd[1..])
-            .spawn()
-            .with_context(|| format!("spawn '{}'", cmd[0]))?;
+        let mut child = {
+            let mut c = Command::new(&cmd[0]);
+            c.args(&cmd[1..]);
+            // Own process group so stray grandchildren can be reaped before
+            // unmount (round-26).
+            {
+                use std::os::unix::process::CommandExt;
+                c.process_group(0);
+            }
+            match c.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Err(te) = self.unmount(mountpoint) {
+                        eprintln!("cowt: warning: unmount failed: {te:#}");
+                    }
+                    guard.disarm();
+                    if let Some(code) = super::spawn_error_code(&e) {
+                        eprintln!("cowt: cannot run '{}': {e}", cmd[0]);
+                        return Ok((code, format!("failed to start '{}'", cmd[0])));
+                    }
+                    return Err(anyhow::anyhow!("spawn '{}': {e}", cmd[0]));
+                }
+            }
+        };
         match super::write_pidfile(pidfile, child.id()) {
             Ok(()) => {}
             Err(e) => {
@@ -179,7 +202,10 @@ impl FuseOverlayfs {
                 return Err(anyhow::anyhow!("{e}"));
             }
         }
+        let _sig = super::ChildSignalGuard::track(child.id());
         let result = child.wait();
+        // Reap stray grandchildren before unmount (round-26).
+        super::kill_child_process_group(child.id());
         // Lazy copy-up: a renamed lower dir has no materialized children in
         // upper; copy them from the still-mounted view so the offline scan
         // (diff/apply) matches what the program saw (else apply drops them).
@@ -239,6 +265,9 @@ impl FuseOverlayfs {
                 return Err(anyhow::anyhow!("{e}"));
             }
         }
+        // unshare --kill-child reaps the namespace on parent death, but the
+        // guard keeps the pid registration consistent with other modes.
+        let _sig = super::ChildSignalGuard::track(child.id());
         let status = child.wait().context("wait for isolated process")?;
         Ok(super::exit_code_and_desc(&status))
     }
@@ -253,7 +282,6 @@ impl FuseOverlayfs {
         pidfile: &Path,
     ) -> Result<(i32, String)> {
         self.available()?;
-        self.available()?;
         let mut guard = self
             .mount(lower, upper, work, mountpoint)
             .with_context(|| format!("mount overlay at {}", mountpoint.display()))?;
@@ -262,10 +290,30 @@ impl FuseOverlayfs {
             mountpoint.display(),
             upper.display()
         );
-        let mut child = Command::new(&cmd[0])
-            .args(&cmd[1..])
-            .spawn()
-            .with_context(|| format!("spawn '{}'", cmd[0]))?;
+        let mut child = {
+            let mut c = Command::new(&cmd[0]);
+            c.args(&cmd[1..]);
+            // Own process group so stray grandchildren can be reaped before
+            // unmount (round-26).
+            {
+                use std::os::unix::process::CommandExt;
+                c.process_group(0);
+            }
+            match c.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    if let Err(te) = self.unmount(mountpoint) {
+                        eprintln!("cowt: warning: unmount failed: {te:#}");
+                    }
+                    guard.disarm();
+                    if let Some(code) = super::spawn_error_code(&e) {
+                        eprintln!("cowt: cannot run '{}': {e}", cmd[0]);
+                        return Ok((code, format!("failed to start '{}'", cmd[0])));
+                    }
+                    return Err(anyhow::anyhow!("spawn '{}': {e}", cmd[0]));
+                }
+            }
+        };
         match super::write_pidfile(pidfile, child.id()) {
             Ok(()) => {}
             Err(e) => {
@@ -274,7 +322,10 @@ impl FuseOverlayfs {
                 return Err(anyhow::anyhow!("{e}"));
             }
         }
+        let _sig = super::ChildSignalGuard::track(child.id());
         let result = child.wait();
+        // Reap stray grandchildren before unmount (round-26).
+        super::kill_child_process_group(child.id());
         // Always unmount, whatever the child did (including crashes).
         match self.unmount(mountpoint) {
             Ok(()) => guard.disarm(),

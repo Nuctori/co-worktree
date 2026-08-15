@@ -11,6 +11,9 @@ use clap::Parser;
 use cli::{Cli, Cmd};
 
 fn main() {
+    // Forward SIGTERM/SIGINT to the isolated child during `cowt run`
+    // (round-26): a killed cowt must not orphan the child holding the mount.
+    backend::install_signal_forwarding();
     let cli = Cli::parse();
     let code = match dispatch(cli) {
         Ok(code) => code,
