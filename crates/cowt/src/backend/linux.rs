@@ -227,7 +227,7 @@ impl FuseOverlayfs {
             .env("COWT_MNT", mountpoint)
             .spawn()
             .context("spawn unshare wrapper")?;
-        super::write_pidfile(pidfile, child.id()).inspect_err(|_| {
+        super::write_pidfile(pidfile, child.id()).inspect_err(|_e| {
             super::reap_orphan_child(&mut child);
         })?;
         let status = child.wait().context("wait for isolated process")?;
@@ -256,7 +256,7 @@ impl FuseOverlayfs {
             .args(&cmd[1..])
             .spawn()
             .with_context(|| format!("spawn '{}'", cmd[0]))?;
-        super::write_pidfile(pidfile, child.id()).inspect_err(|_| {
+        super::write_pidfile(pidfile, child.id()).inspect_err(|_e| {
             super::reap_orphan_child(&mut child);
         })?;
         let result = child.wait();

@@ -71,7 +71,7 @@ pub trait Backend: Send + Sync {
                 return Err(anyhow::anyhow!("spawn '{}': {e}", cmd[0]));
             }
         };
-        write_pidfile(pidfile, child.id()).inspect_err(|_| {
+        write_pidfile(pidfile, child.id()).inspect_err(|_e| {
             reap_orphan_child(&mut child);
         })?;
         let result = child.wait();
