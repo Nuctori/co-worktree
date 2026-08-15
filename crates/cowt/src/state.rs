@@ -167,6 +167,13 @@ impl State {
         Manifest::from_json(&s).context("parse manifest.json")
     }
 
+    /// Atomically replace the base manifest (apply advances the baseline to
+    /// the merged host state so the next run/diff/apply iterates against it).
+    pub fn write_manifest(dir: &Path, manifest: &Manifest) -> Result<()> {
+        let json = serde_json::to_string_pretty(manifest).context("serialize manifest")?;
+        atomic_write(&dir.join("manifest.json"), json.as_bytes()).context("write manifest.json")
+    }
+
     pub fn list(&self) -> Result<Vec<WorktreeMeta>> {
         let mut out = Vec::new();
         for entry in fs::read_dir(&self.root).with_context(|| "read state root")? {

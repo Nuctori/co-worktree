@@ -1343,28 +1343,11 @@ fn e2e_case_recreate() {
         .flatten()
         .map(|e| e.file_name().to_string_lossy().into_owned())
         .collect();
-    // The kernel-style whiteout is a char dev carrying the victim's own name
-    // — it is not a ghost entry. Only real file entries count.
-    let cache_entries = fs::read_dir(env.upper_of(&id))
-        .unwrap()
-        .flatten()
-        .filter(|e| {
-            e.file_name().to_string_lossy().to_lowercase() == "cache.bin" && {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::FileTypeExt;
-                    !e.file_type().map(|t| t.is_char_device()).unwrap_or(false)
-                }
-                #[cfg(windows)]
-                {
-                    true
-                }
-            }
-        })
-        .count();
-    assert_eq!(
-        cache_entries, 1,
-        "exactly one real cache.bin entry in upper after apply: {upper_files:?}"
+    // The layer is reset after apply (round-19 semantics): applied changes
+    // live in the host, so upper must be empty (or hold only whiteouts).
+    assert!(
+        upper_files.is_empty() || upper_files.iter().all(|n| n.starts_with(".wh.")),
+        "layer must be reset after apply: {upper_files:?}"
     );
     env.cowt_ok(&["drop", &id]);
 }

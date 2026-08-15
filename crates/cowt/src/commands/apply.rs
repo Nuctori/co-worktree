@@ -2,6 +2,7 @@
 
 use anyhow::{bail, Result};
 use cowt_core::{merge, overlay, Manifest};
+use std::fs;
 
 use crate::backend::{default_backend, recover_stale_mount};
 use crate::state::{State, Status};
@@ -95,6 +96,18 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
     }
 
     let report = merge::execute(&plan, &meta.target)?;
+    // Advance the baseline: the host now matches the merged result, so the
+    // next run/diff/apply iterates against THIS state rather than the stale
+    // fork snapshot (fixes apply→run→apply false conflicts, silently
+    // dropped deletions of previously-applied files, and revert-to-base).
+    let new_base = Manifest::scan(&meta.target)?.manifest;
+    State::write_manifest(&dir, &new_base)?;
+    // Reset the layer: applied changes now live in the host. Keeping them
+    // in upper would re-display them as pending and make upper-only
+    // deletions after apply unrepresentable (effective_manifest keeps base
+    // entries that upper no longer has).
+    let _ = fs::remove_dir_all(&upper);
+    fs::create_dir_all(&upper)?;
     let mut meta = meta;
     meta.status = Status::Applied;
     State::write_meta(&dir, &meta)?;
@@ -113,7 +126,7 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
             report.written, report.deleted, report.kept, report.converged
         );
         println!(
-            "worktree preserved for audit; `cowt drop {}` to discard",
+            "changes applied and baseline advanced; `cowt drop {}` to discard",
             meta.id
         );
     }

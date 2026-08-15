@@ -42,6 +42,16 @@ impl Env {
         c
     }
 
+    fn cowt_ok(&self, args: &[&str]) -> String {
+        let out = self.cowt().args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "cowt {args:?} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    }
+
     fn fork(&self) -> String {
         let out = self
             .cowt()
@@ -512,4 +522,54 @@ fn resolve_rejects_path_traversal_ids() {
             "{cmd} with traversal id must be refused"
         );
     }
+}
+
+#[test]
+fn iterative_apply_run_apply_workflow() {
+    // Regression for round-19: after apply, the baseline advances, so a
+    // second run+apply cycle must not false-conflict against the stale fork
+    // snapshot, and deleting a previously-applied file must land.
+    let env = Env::new();
+    let _ = env.fork();
+    let upper = env.upper();
+    // Simulate run 1: modify config.txt through the view (write upper).
+    fs::create_dir_all(&upper).unwrap();
+    fs::write(upper.join("config.txt"), "BETA\n").unwrap();
+    let out = env.cowt().args(["apply", "demo"]).output().unwrap();
+    assert!(out.status.success(), "apply 1 failed");
+    assert_eq!(
+        fs::read_to_string(env.target.join("config.txt")).unwrap(),
+        "BETA\n"
+    );
+
+    // Run 2: edit again + add a file; apply must succeed (no false conflict).
+    fs::write(upper.join("config.txt"), "BETA2\n").unwrap();
+    fs::write(upper.join("new.txt"), "added\n").unwrap();
+    let out = env.cowt().args(["apply", "demo"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "second apply must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert_eq!(
+        fs::read_to_string(env.target.join("config.txt")).unwrap(),
+        "BETA2\n"
+    );
+    assert_eq!(
+        fs::read_to_string(env.target.join("new.txt")).unwrap(),
+        "added\n"
+    );
+
+    // Run 3: delete the previously-applied file through the view. The layer
+    // was reset by apply 2, so the file now lives in the host (lower) —
+    // deleting it through the view produces a whiteout.
+    fs::write(upper.join(".wh.new.txt"), b"").unwrap();
+    let out = env.cowt().args(["apply", "demo"]).output().unwrap();
+    assert!(out.status.success(), "apply 3 failed");
+    assert!(out.status.success(), "apply 3 failed");
+    assert!(
+        !env.target.join("new.txt").exists(),
+        "deletion of a previously-applied file must reach the host"
+    );
+    env.cowt_ok(&["drop", "demo"]);
 }
