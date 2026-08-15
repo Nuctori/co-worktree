@@ -36,15 +36,17 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
     // 2. A stale mount must come down before deleting state. Note the owning
     // `cowt run` may be unmounting concurrently after its child died, so the
     // outcome is decided by the final state, not by a single unmount call.
-    // Only mounts proven to be our own leftover (stale pidfile) are torn
-    // down — a foreign mount on the target is never unmounted, even with
-    // --force (D-005 boundary).
+    // Only mounts proven to be our own leftover (stale pidfile, or a
+    // moved-aside `real` dir — the kill-window crash case where the pidfile
+    // was never written) are torn down. A foreign mount on the target is
+    // never unmounted, even with --force (D-005 boundary).
     let mut foreign_mount = false;
     for _ in 0..30 {
         if !backend.is_mounted(&meta.target) {
             break;
         }
-        if !State::stale_run(&dir) {
+        let own_leftover = State::stale_run(&dir) || dir.join("real").exists();
+        if !own_leftover {
             foreign_mount = true;
             break;
         }
@@ -68,7 +70,8 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
     // 3. Atomic-ish removal: rename aside first so the worktree id vanishes
     // immediately, then delete the data directory. On Windows the killed
     // `cowt run` may still be tearing down its WinFsp mount (inside the state
-    // dir), so retry the deletion briefly.
+    // dir), so retry the deletion briefly. Old `.trash-*` leftovers from
+    // previously failed drops are swept first.
     let trash = state.root().join(format!(
         ".trash-{}-{}",
         meta.id,
@@ -77,6 +80,14 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
+    if let Ok(rd) = fs::read_dir(state.root()) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".trash-") {
+                let _ = fs::remove_dir_all(e.path());
+            }
+        }
+    }
     fs::rename(&dir, &trash).with_context(|| format!("rename {} aside", dir.display()))?;
     let mut last_err = None;
     for _ in 0..30 {

@@ -926,6 +926,9 @@ fn e2e_crash_recovery_on_next_run() {
     let app_pid = fs::read_to_string(env.state.join(&id).join("run.pid"))
         .unwrap()
         .trim()
+        .split(':')
+        .next()
+        .unwrap()
         .parse::<u32>()
         .unwrap();
     let _ = run_child.kill(); // SIGKILL / TerminateProcess on cowt run

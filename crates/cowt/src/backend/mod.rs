@@ -127,8 +127,47 @@ pub(crate) fn materialize_lazy_upper(view: &Path, upper: &Path) -> std::io::Resu
     Ok(())
 }
 /// Record the running child's pid (best effort — drop still verifies /proc).
+/// Format: `<pid>` or `<pid>:<starttime>` — the starttime lets `drop
+/// --force` distinguish a recycled pid (old crash residue whose pid was
+/// reused by an unrelated process) from the actual child, preventing
+/// killing innocent processes.
 pub(crate) fn write_pidfile(path: &Path, pid: u32) {
-    let _ = std::fs::write(path, pid.to_string());
+    let start = process_starttime(pid);
+    let body = match start {
+        Some(s) => format!("{pid}:{s}"),
+        None => pid.to_string(),
+    };
+    let _ = std::fs::write(path, body);
+}
+
+/// Process start time in a comparable form: unix = starttime field of
+/// /proc/<pid>/stat (clock ticks since boot); Windows = creation FILETIME
+/// (100ns since 1601). `None` when unavailable.
+pub(crate) fn process_starttime(pid: u32) -> Option<u128> {
+    #[cfg(unix)]
+    {
+        let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+        let after_comm = stat.rfind(')')?;
+        let fields: Vec<&str> = stat[after_comm + 1..].split_whitespace().collect();
+        // Fields 3.. are state, ppid, ..., starttime is field 22 -> index 19.
+        fields.get(19)?.parse().ok()
+    }
+    #[cfg(windows)]
+    {
+        use windows::Win32::Foundation::{CloseHandle, FILETIME};
+        use windows::Win32::System::Threading::{
+            GetProcessTimes, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+        };
+        let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
+        let mut created = FILETIME::default();
+        let mut exit = FILETIME::default();
+        let mut kern = FILETIME::default();
+        let mut user = FILETIME::default();
+        let ok = unsafe { GetProcessTimes(handle, &mut created, &mut exit, &mut kern, &mut user) };
+        let _ = unsafe { CloseHandle(handle) };
+        ok.is_ok()
+            .then_some(((created.dwHighDateTime as u128) << 32) | created.dwLowDateTime as u128)
+    }
 }
 
 /// RAII guard: unmounts on drop unless explicitly disarmed (used after a
@@ -243,10 +282,12 @@ pub fn unmount_best_effort(mountpoint: &Path) -> Result<()> {
 /// Shared stale-mount gate for `run` / `diff` / `apply`.
 ///
 /// A mount at `target` is only ever torn down when the worktree's own
-/// pidfile proves a previous `cowt run` died (crashed or killed): that makes
-/// the mount ours by construction. Anything else — a live run that has not
-/// written its pidfile yet, or a foreign mount (manual mount, another tool)
-/// — refuses, preserving the original "already a mountpoint" semantics.
+/// pidfile proves a previous `cowt run` died (crashed or killed), or when
+/// the moved-aside `real` dir exists (the kill-window crash case where the
+/// pidfile was never written): either makes the mount ours by construction.
+/// Anything else — a live run that has not written its pidfile yet, or a
+/// foreign mount (manual mount, another tool) — refuses, preserving the
+/// original "already a mountpoint" semantics.
 ///
 /// Returns `true` when a stale mount was cleaned up.
 pub fn recover_stale_mount(
@@ -257,7 +298,8 @@ pub fn recover_stale_mount(
     if !backend.is_mounted(target) {
         return Ok(false);
     }
-    if crate::state::State::stale_run(dir) {
+    let own_leftover = crate::state::State::stale_run(dir) || dir.join("real").exists();
+    if own_leftover {
         eprintln!("cowt: removing stale mount at {}", target.display());
         backend.unmount(target)?;
         Ok(true)

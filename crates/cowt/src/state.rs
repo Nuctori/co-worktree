@@ -126,6 +126,11 @@ impl State {
             if !dir.is_dir() || !dir.join("meta.json").exists() {
                 continue;
             }
+            // A `.trash-*` rename-aside from a failed `drop` is not a
+            // worktree; hide it from list/resolve so no ghost entries.
+            if entry.file_name().to_string_lossy().starts_with(".trash-") {
+                continue;
+            }
             if let Ok(meta) = Self::load_meta(&dir) {
                 out.push(meta);
             }
@@ -134,15 +139,26 @@ impl State {
         Ok(out)
     }
 
-    /// Pid of the running process for this worktree, if alive.
+    /// Pid of the running process for this worktree, if alive AND (when the
+    /// pidfile carries a starttime) still the same process — a recycled pid
+    /// (crash residue whose pid was reused by an unrelated process) is NOT
+    /// reported, so `drop --force` never kills an innocent process.
     pub fn running_pid(dir: &Path) -> Option<u32> {
         let s = fs::read_to_string(dir.join("run.pid")).ok()?;
-        let pid: u32 = s.trim().parse().ok()?;
-        if pid_alive(pid) {
-            Some(pid)
-        } else {
-            None
+        let s = s.trim();
+        let (pid, expected_start) = match s.split_once(':') {
+            Some((p, st)) => (p.parse::<u32>().ok()?, Some(st.parse::<u128>().ok()?)),
+            None => (s.parse::<u32>().ok()?, None),
+        };
+        if !pid_alive(pid) {
+            return None;
         }
+        if let Some(expected) = expected_start {
+            if crate::backend::process_starttime(pid) != Some(expected) {
+                return None; // pid reused by an unrelated process
+            }
+        }
+        Some(pid)
     }
 
     /// True when a previous `cowt run` left its pidfile behind but the
@@ -300,6 +316,23 @@ mod tests {
             // u32::MAX is simply an invalid pid on Windows (no broadcast).
             assert!(!pid_alive(u32::MAX));
         }
+    }
+
+    #[test]
+    fn running_pid_rejects_recycled_pid() {
+        // A pidfile carrying a bogus starttime must NOT report our own live
+        // pid as running (that would let `drop --force` kill an innocent
+        // process after a pid reuse).
+        let tmp = tempfile::tempdir().unwrap();
+        fs::write(
+            tmp.path().join("run.pid"),
+            format!("{}:1", std::process::id()),
+        )
+        .unwrap();
+        assert!(State::running_pid(tmp.path()).is_none());
+        // Legacy plain-pid format still works.
+        fs::write(tmp.path().join("run.pid"), std::process::id().to_string()).unwrap();
+        assert_eq!(State::running_pid(tmp.path()), Some(std::process::id()));
     }
 
     #[test]
