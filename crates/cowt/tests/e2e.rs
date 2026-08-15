@@ -100,11 +100,6 @@ impl Env {
         }
     }
 
-    fn doctor_available(&self) -> bool {
-        let out = self.cowt().arg("doctor").output().unwrap();
-        String::from_utf8_lossy(&out.stdout).contains("available: yes")
-    }
-
     /// Is a mount/junction present at `target` right now?
     fn backend_is_mounted(&self, target: &Path) -> bool {
         #[cfg(target_os = "linux")]
