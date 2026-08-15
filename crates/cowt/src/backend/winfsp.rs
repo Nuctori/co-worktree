@@ -5,9 +5,17 @@
 //! This backend implements a passthrough-with-copy-up FS:
 //!
 //! ```text
-//! target (junction) ──▶ state/<id>/view   (WinFsp mount)
-//!                        ├── lower ─▶ state/<id>/real   (host dir, moved aside)
-//!                        └── upper ─▶ state/<id>/upper  (isolated writes)
+//! target ──▶ WinFsp mount at state/<id>/view
+//!            ├── lower ─▶ state/<id>/real   (host dir, moved aside)
+//!            └── upper ─▶ state/<id>/upper  (isolated writes)
+//! ```
+//!
+//! While a worktree runs, the host directory is *moved aside* to `real` and
+//! WinFsp mounts directly onto the original path (junction chaining was
+//! abandoned: WinFsp does not resolve a mounted view through a junction
+//! reparse chain). Reads pass through to `real`; writes copy files up into
+//! `upper` first; deletions of lower-only files leave `.wh.<name>` whiteouts
+//! (the same encoding cowt-core parses on Linux).
 //! ```
 //!
 //! While a worktree runs, the host directory is *moved aside* to `real` and

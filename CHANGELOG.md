@@ -48,8 +48,8 @@ All notable changes to co-worktree are documented here.
   whiteouts (delete-then-recreate round-trip, covered by a new E2E test).
 - `flush` no longer calls `sync_all()` on read-only WinFsp handles
   (FlushFileBuffers denies on read-only handles).
-- Windows `pid_alive` distinguishes `ERROR_ACCESS_DENIED` (protected
   process, alive) from `ERROR_INVALID_PARAMETER` (no such pid).
+- `cowt drop --force` only unmounts mounts proven to be our own stale
   leftovers; foreign mounts are refused even with `--force`.
 
 ### Known limitations
