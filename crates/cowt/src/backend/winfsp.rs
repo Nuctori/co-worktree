@@ -406,6 +406,31 @@ impl CowFs {
         self.lower.join(rel)
     }
 
+    /// True if `rel` or any of its ancestors is whiteouted in upper: a
+    /// directory whiteout shadows the whole subtree beneath it.
+    fn is_shadowed(&self, rel: &Path) -> bool {
+        let mut cur = rel;
+        loop {
+            let (parent, name) = match (cur.parent(), cur.file_name()) {
+                (Some(p), Some(n)) if !cur.as_os_str().is_empty() => (p, n),
+                _ => return false,
+            };
+            let needle = name.to_string_lossy().to_lowercase();
+            if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
+                for e in rd.flatten() {
+                    let s = e.file_name();
+                    let s = s.to_string_lossy();
+                    if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
+                        if victim.to_lowercase() == needle {
+                            return true;
+                        }
+                    }
+                }
+            }
+            cur = parent;
+        }
+    }
+
     /// Where the merged entry lives; upper wins. The empty path is the
     /// volume root, served from the lower (host) dir. A whiteout in upper
     /// shadows the lower entry — but an *upper* entry wins over its own
@@ -419,18 +444,10 @@ impl CowFs {
         if fs::symlink_metadata(&up).is_ok() {
             return Some(up);
         }
-        // Whiteout check (case-insensitive: WinFsp may pass an uppercase name).
-        if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
-            let needle = name.to_string_lossy().to_lowercase();
-            for e in rd.flatten() {
-                let n = e.file_name();
-                let n = n.to_string_lossy();
-                if let Some(victim) = n.strip_prefix(WHITEOUT_PREFIX) {
-                    if victim.to_lowercase() == needle {
-                        return None; // deleted in the worktree
-                    }
-                }
-            }
+        // Whiteout check: the entry itself or any ancestor may be whiteouted
+        // (directory whiteouts shadow whole subtrees). Case-insensitive.
+        if self.is_shadowed(rel) {
+            return None; // deleted in the worktree
         }
         let low = self.lower_of(rel);
         if fs::symlink_metadata(&low).is_ok() {
@@ -477,14 +494,12 @@ impl CowFs {
     /// ones; whiteouts and the lower entries they shadow are excluded.
     fn merged_dir_entries(&self, rel: &Path) -> Vec<(std::ffi::OsString, bool)> {
         let mut names: Vec<(std::ffi::OsString, bool, bool)> = Vec::new(); // (name, is_dir, from_upper)
-        let mut whiteouts: Vec<std::ffi::OsString> = Vec::new();
         if let Ok(rd) = fs::read_dir(self.upper_of(rel)) {
             for e in rd.flatten() {
                 let name = e.file_name();
                 let s = name.to_string_lossy();
-                if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
-                    whiteouts.push(std::ffi::OsString::from(victim));
-                    continue;
+                if s.starts_with(WHITEOUT_PREFIX) {
+                    continue; // whiteouts are never listed
                 }
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
                 names.push((name, is_dir, true));
@@ -496,11 +511,9 @@ impl CowFs {
                 if names.iter().any(|(n, _, _)| *n == name) {
                     continue; // shadowed by an upper entry
                 }
-                // Case-insensitive shadowing: WinFsp may normalize the
-                // whiteout victim name to uppercase.
-                if whiteouts.iter().any(|w| {
-                    w.to_string_lossy().to_lowercase() == name.to_string_lossy().to_lowercase()
-                }) {
+                // Shadowed by a whiteout: the entry itself or any ancestor
+                // (directory whiteouts cover whole subtrees).
+                if self.is_shadowed(&rel.join(&name)) {
                     continue;
                 }
                 let is_dir = e.file_type().map(|t| t.is_dir()).unwrap_or(false);
@@ -509,6 +522,32 @@ impl CowFs {
         }
         names.sort_by(|a, b| a.0.cmp(&b.0));
         names.into_iter().map(|(n, d, _)| (n, d)).collect()
+    }
+
+    /// The *actual* on-disk name of `rel`'s final component: WinFsp passes
+    /// names normalized to uppercase and Windows' case-insensitive FS would
+    /// happily create `.wh.UPPER` entries that never match the lowercase
+    /// base manifest. Enumerate the parent to find the real spelling.
+    fn actual_disk_name(&self, rel: &Path) -> String {
+        let needle = rel
+            .file_name()
+            .map(|n| n.to_string_lossy().to_lowercase())
+            .unwrap_or_default();
+        let parent = rel.parent().unwrap_or(Path::new(""));
+        let find = |dir: &Path| {
+            fs::read_dir(dir).ok().and_then(|rd| {
+                rd.flatten()
+                    .find(|e| e.file_name().to_string_lossy().to_lowercase() == needle)
+            })
+        };
+        find(&self.upper_of(parent))
+            .or_else(|| find(&self.lower_of(parent)))
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .unwrap_or_else(|| {
+                rel.file_name()
+                    .map(|n| n.to_string_lossy().into_owned())
+                    .unwrap_or_default()
+            })
     }
 
     /// Delete a merged path: remove the upper copy (if any), then whiteout
@@ -525,31 +564,7 @@ impl CowFs {
         if fs::symlink_metadata(self.lower_of(rel)).is_err() {
             return Ok(()); // nothing left to hide
         }
-        // The whiteout must carry the *actual* on-disk name: WinFsp passes
-        // the name normalized to uppercase, and Windows' case-insensitive
-        // filesystem would happily resolve the uppercase path and keep its
-        // spelling. Enumerate the parent to find the real name.
-        let needle = rel
-            .file_name()
-            .map(|n| n.to_string_lossy().to_lowercase())
-            .unwrap_or_default();
-        let actual = {
-            let parent = rel.parent().unwrap_or(Path::new(""));
-            let find = |dir: &Path| {
-                fs::read_dir(dir).ok().and_then(|rd| {
-                    rd.flatten()
-                        .find(|e| e.file_name().to_string_lossy().to_lowercase() == needle)
-                })
-            };
-            find(&self.upper_of(parent))
-                .or_else(|| find(&self.lower_of(parent)))
-                .map(|e| e.file_name().to_string_lossy().into_owned())
-                .unwrap_or_else(|| {
-                    rel.file_name()
-                        .map(|n| n.to_string_lossy().into_owned())
-                        .unwrap_or_default()
-                })
-        };
+        let actual = self.actual_disk_name(rel);
         let wh = up.with_file_name(format!("{WHITEOUT_PREFIX}{actual}"));
         if let Some(p) = wh.parent() {
             fs::create_dir_all(p)?;
@@ -558,21 +573,30 @@ impl CowFs {
         Ok(())
     }
 
-    /// Remove the whiteout for `rel`, if any (case-insensitively).
+    /// Remove the whiteout for `rel` and every ancestor, if any
+    /// (case-insensitively): recreating a path clears the shadow so lower
+    /// entries become visible again (overlayfs semantics without opaque
+    /// markers).
     fn clear_whiteout(&self, rel: &Path) {
-        let (parent, name) = (rel.parent().unwrap_or(Path::new("")), rel.file_name());
-        let Some(name) = name else { return };
-        let needle = name.to_string_lossy().to_lowercase();
-        if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
-            for e in rd.flatten() {
-                let n = e.file_name();
-                let s = n.to_string_lossy();
-                if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
-                    if victim.to_lowercase() == needle {
-                        let _ = fs::remove_file(e.path());
+        let mut cur = rel;
+        loop {
+            let (parent, name) = match (cur.parent(), cur.file_name()) {
+                (Some(p), Some(n)) if !cur.as_os_str().is_empty() => (p, n),
+                _ => return,
+            };
+            let needle = name.to_string_lossy().to_lowercase();
+            if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
+                for e in rd.flatten() {
+                    let n = e.file_name();
+                    let s = n.to_string_lossy();
+                    if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
+                        if victim.to_lowercase() == needle {
+                            let _ = fs::remove_file(e.path());
+                        }
                     }
                 }
             }
+            cur = parent;
         }
     }
     fn fill_file_info(meta: &fs::Metadata, attrs: u32, info: &mut FileInfo) {
@@ -865,11 +889,10 @@ impl FileSystemContext for CowFs {
         }
         fs::rename(&src_up, &dst_up)?;
         if lower_has {
-            let name = src
-                .file_name()
-                .and_then(|n| n.to_str())
-                .ok_or_else(|| io::Error::new(ErrorKind::InvalidInput, "no file name"))?;
-            let wh = src_up.with_file_name(format!("{WHITEOUT_PREFIX}{name}"));
+            // The whiteout must carry the *actual* disk spelling (WinFsp
+            // passes names normalized to uppercase).
+            let actual = self.actual_disk_name(&src);
+            let wh = src_up.with_file_name(format!("{WHITEOUT_PREFIX}{actual}"));
             fs::write(&wh, b"")?;
         }
         Ok(())

@@ -127,9 +127,42 @@ impl CowFs {
         if fs::symlink_metadata(&up).is_ok() {
             return Some(up);
         }
-        // Whiteout check: a `.wh.<name>` in upper means the lower entry was
-        // deleted in the worktree.
-        let (parent, name) = (rel.parent().unwrap_or(Path::new("")), rel.file_name()?);
+        // Whiteout check: the entry itself or any ancestor may be whiteouted
+        // (directory whiteouts shadow whole subtrees).
+        if self.is_shadowed(rel) {
+            return None; // deleted in the worktree
+        }
+        let low = self.lower_of(rel);
+        if fs::symlink_metadata(&low).is_ok() {
+            return Some(low);
+        }
+        None
+    }
+
+    /// True if `rel` or any of its ancestors is whiteouted in upper: a
+    /// directory whiteout shadows the whole subtree beneath it.
+    fn is_shadowed(&self, rel: &Path) -> bool {
+        let mut cur = rel;
+        loop {
+            let (parent, name) = match (cur.parent(), cur.file_name()) {
+                (Some(p), Some(n)) if !cur.as_os_str().is_empty() => (p, n),
+                _ => return false,
+            };
+            let needle = name.to_string_lossy().to_lowercase();
+            if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
+                for e in rd.flatten() {
+                    let s = e.file_name();
+                    let s = s.to_string_lossy();
+                    if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
+                        if victim.to_lowercase() == needle {
+                            return true;
+                        }
+                    }
+                }
+            }
+            cur = parent;
+        }
+    }
         if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
             let needle = name.to_string_lossy().to_lowercase();
             for e in rd.flatten() {
@@ -151,19 +184,29 @@ impl CowFs {
 
     /// Merged directory entries: upper wins; whiteouts and the lower entries
     /// they shadow are excluded.
-    fn merged_dir_entries(&self, rel: &Path) -> Vec<std::ffi::OsString> {
         let mut names: Vec<std::ffi::OsString> = Vec::new();
-        let mut whiteouts: Vec<std::ffi::OsString> = Vec::new();
         if let Ok(rd) = fs::read_dir(self.upper_of(rel)) {
             for e in rd.flatten() {
                 let name = e.file_name();
                 let s = name.to_string_lossy();
-                if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
-                    whiteouts.push(std::ffi::OsString::from(victim));
-                    continue;
+                if s.starts_with(WHITEOUT_PREFIX) {
+                    continue; // whiteouts are never listed
                 }
                 names.push(name);
             }
+        }
+        if let Ok(rd) = fs::read_dir(self.lower_of(rel)) {
+            for e in rd.flatten() {
+                let name = e.file_name();
+                if names.iter().any(|n| *n == name) {
+                    continue; // shadowed by an upper entry
+                }
+                if self.is_shadowed(&rel.join(&name)) {
+                    continue; // shadowed by a whiteout (entry or ancestor)
+                }
+                names.push(name);
+            }
+        }
         }
         if let Ok(rd) = fs::read_dir(self.lower_of(rel)) {
             for e in rd.flatten() {
@@ -233,21 +276,30 @@ impl CowFs {
         Ok(())
     }
 
-    /// Remove the whiteout for `rel`, if any (case-insensitively).
+    /// Remove the whiteout for `rel` and every ancestor, if any
+    /// (case-insensitively): recreating a path clears the shadow so lower
+    /// entries become visible again (overlayfs semantics without opaque
+    /// markers).
     fn clear_whiteout(&self, rel: &Path) {
-        let (parent, name) = (rel.parent().unwrap_or(Path::new("")), rel.file_name());
-        let Some(name) = name else { return };
-        let needle = name.to_string_lossy().to_lowercase();
-        if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
-            for e in rd.flatten() {
-                let n = e.file_name();
-                let s = n.to_string_lossy();
-                if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
-                    if victim.to_lowercase() == needle {
-                        let _ = fs::remove_file(e.path());
+        let mut cur = rel;
+        loop {
+            let (parent, name) = match (cur.parent(), cur.file_name()) {
+                (Some(p), Some(n)) if !cur.as_os_str().is_empty() => (p, n),
+                _ => return,
+            };
+            let needle = name.to_string_lossy().to_lowercase();
+            if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
+                for e in rd.flatten() {
+                    let n = e.file_name();
+                    let s = n.to_string_lossy();
+                    if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
+                        if victim.to_lowercase() == needle {
+                            let _ = fs::remove_file(e.path());
+                        }
                     }
                 }
             }
+            cur = parent;
         }
     }
     /// FUSE attributes for a merged path.

@@ -135,6 +135,11 @@ Windows cross-compile check, release builds for all three.
 - **Windows same-volume limit**: the state dir (`COWT_HOME`, default
   `%LOCALAPPDATA%\cowt`) must be on the same volume as the target (Windows
   cannot rename across volumes); `cowt run` reports a clear error otherwise
+- **Windows: `std::fs::remove_dir_all` fails on the view** with
+  `ERROR_INVALID_NAME` (std opens dirs with `FILE_OPEN_REPARSE_POINT`, which
+  WinFsp rejects on non-reparse paths). Real-world deletion via
+  cmd/explorer/PowerShell works normally; Rust programs should delete
+  directory trees by enumerating and removing entries individually.
 
 ## Performance
 

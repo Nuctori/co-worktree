@@ -55,9 +55,15 @@ pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
         });
     }
 
-    // 2. Explicit whiteouts delete the named sibling.
+    // 2. Whiteouts delete the named sibling AND its whole subtree. Kernel
+    //    overlayfs semantics: a directory whiteout shadows the entire lower
+    //    tree. The winfsp/macos backends also collapse nested whiteouts when
+    //    a parent dir is removed, so the top-level whiteout must cover all
+    //    descendants (Path::starts_with is component-wise, so a file whiteout
+    //    still only matches itself).
     for d in deleted {
-        entries.remove(&d);
+        let prefix = d.clone();
+        entries.retain(|p, _| !p.starts_with(&prefix));
     }
 
     // 3. Everything present in upper overrides base.

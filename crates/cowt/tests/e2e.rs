@@ -1072,6 +1072,202 @@ fn e2e_apply_diff_refused_while_running() {
 
     // After the run, both work again.
     let _ = env.cowt_ok(&["diff", &id, "--json"]);
+    let _ = env.cowt_ok(&["diff", &id, "--json"]);
     env.cowt_ok(&["apply", &id]);
+    env.cowt_ok(&["drop", &id]);
+}
+
+/// An app with a seeded `logs/session.log` subtree in the LOWER layer.
+fn tree_app(env: &Env) -> (PathBuf, String) {
+    let app = env.app_dir("treeapp");
+    fs::create_dir_all(app.join("logs")).unwrap();
+    fs::write(app.join("logs/session.log"), "session\n").unwrap();
+    fs::write(app.join("settings.txt"), "line1\nline2\nline3\n").unwrap();
+    env.cowt_ok(&["fork", app.to_str().unwrap(), "--name", "treeapp"]);
+    let id = env.worktree_id("treeapp");
+    (app, id)
+}
+
+/// Adversarial: whole directory-tree deletion through the view. Nested
+/// whiteouts collapse when the parent dir is removed, so the top-level
+/// whiteout must shadow the entire subtree in diff/apply (kernel overlayfs
+/// semantics). Recreating a path inside must un-shadow it.
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_dir_tree_delete() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let (app, id) = tree_app(&env);
+
+    let mut sleeper = spawn_sleeper(&env, &id, 6);
+    // rm -rf logs (contains session.log) through the view.
+    #[cfg(windows)]
+    {
+        // Real-world Windows deletion (cmd/explorer/PowerShell) uses
+        // FindFirstFile+DeleteFile+RemoveDirectory. std's remove_dir_all is
+        // avoided deliberately: it opens dirs with FILE_OPEN_REPARSE_POINT,
+        // which WinFsp rejects on non-reparse paths with ERROR_INVALID_NAME
+        // (known limitation, documented in README).
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "rmdir", "/s", "/q"])
+            .arg(app.join("logs"))
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "rmdir /s /q failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    #[cfg(unix)]
+    fs::remove_dir_all(app.join("logs")).unwrap();
+    assert!(
+        !app.join("logs/session.log").exists(),
+        "deleted subtree must be hidden through the view"
+    );
+    wait_run(&mut sleeper);
+    assert_mount_gone(&app);
+
+    // Diff: the whole subtree is reported deleted (whiteout shadows all
+    // descendants — VULN-1 fix).
+    let json = env.cowt_ok(&["diff", &id, "--json"]);
+    let kinds: HashMap<String, String> = parse_changes(&json).into_iter().collect();
+    assert_eq!(
+        kinds.get("logs/session.log").map(String::as_str),
+        Some("deleted"),
+        "subtree child must diff as deleted: {kinds:?}"
+    );
+    assert_eq!(
+        kinds.get("logs").map(String::as_str),
+        Some("deleted"),
+        "subtree root must diff as deleted: {kinds:?}"
+    );
+
+    // Apply: host loses the whole deleted subtree.
+    env.cowt_ok(&["apply", &id]);
+    assert!(
+        !app.join("logs/session.log").exists() && !app.join("logs").exists(),
+        "apply must remove the deleted subtree from the host"
+    );
+    env.cowt_ok(&["drop", &id]);
+}
+
+/// Overlayfs semantics: recreating a directory that was deleted un-shadows
+/// it (no opaque markers) — lower entries become visible again and diff
+/// correctly reports only the recreated file as added.
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_dir_recreate_unshadows() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let (app, id) = tree_app(&env);
+
+    let mut sleeper = spawn_sleeper(&env, &id, 6);
+    #[cfg(windows)]
+    {
+        let out = std::process::Command::new("cmd")
+            .args(["/C", "rmdir", "/s", "/q"])
+            .arg(app.join("logs"))
+            .output()
+            .unwrap();
+        assert!(out.status.success(), "rmdir failed");
+    }
+    #[cfg(unix)]
+    fs::remove_dir_all(app.join("logs")).unwrap();
+    // Recreate the directory and a new file: the shadow clears, so the
+    // lower file resurfaces (matches kernel overlayfs without opaque).
+    fs::create_dir_all(app.join("logs")).unwrap();
+    fs::write(app.join("logs/partial.txt"), "new\n").unwrap();
+    assert_eq!(
+        fs::read_to_string(app.join("logs/partial.txt")).unwrap(),
+        "new\n",
+        "recreated path must be visible through the view"
+    );
+    wait_run(&mut sleeper);
+    assert_mount_gone(&app);
+
+    // Diff: only the recreated file is added; the resurfaced lower file is
+    // unchanged (base == work) and must NOT be reported deleted.
+    let json = env.cowt_ok(&["diff", &id, "--json"]);
+    let kinds: HashMap<String, String> = parse_changes(&json).into_iter().collect();
+    assert_eq!(
+        kinds.get("logs/partial.txt").map(String::as_str),
+        Some("added"),
+        "recreated file must diff as added: {kinds:?}"
+    );
+    assert_eq!(
+        kinds.get("logs/session.log").map(String::as_str),
+        None,
+        "resurfaced lower file must not diff as deleted: {kinds:?}"
+    );
+
+    // Apply: resurfaced lower file survives (b==w keeps it), new file lands.
+    env.cowt_ok(&["apply", &id]);
+    assert_eq!(
+        fs::read_to_string(app.join("logs/session.log")).unwrap(),
+        "session\n",
+        "resurfaced lower file must survive apply"
+    );
+    assert_eq!(
+        fs::read_to_string(app.join("logs/partial.txt")).unwrap(),
+        "new\n"
+    );
+    env.cowt_ok(&["drop", &id]);
+}
+
+/// Adversarial: rename a whole directory across layers. The source must be
+/// whiteouted (shadowing its subtree) and the destination copy-up'd.
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_dir_rename() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let (app, id) = tree_app(&env);
+
+    let mut sleeper = spawn_sleeper(&env, &id, 6);
+    fs::rename(app.join("logs"), app.join("logs2")).unwrap();
+    assert!(
+        app.join("logs2/session.log").exists(),
+        "renamed dir must be visible through the view"
+    );
+    assert!(
+        !app.join("logs/session.log").exists(),
+        "renamed-away subtree must be hidden"
+    );
+    wait_run(&mut sleeper);
+    assert_mount_gone(&app);
+
+    // Diff: source subtree deleted, destination added.
+
+    // Diff: source subtree deleted, destination added.
+    let json = env.cowt_ok(&["diff", &id, "--json"]);
+    let kinds: HashMap<String, String> = parse_changes(&json).into_iter().collect();
+    assert_eq!(
+        kinds.get("logs/session.log").map(String::as_str),
+        Some("deleted"),
+        "renamed-away subtree must diff as deleted: {kinds:?}"
+    );
+    assert_eq!(
+        kinds.get("logs2/session.log").map(String::as_str),
+        Some("added"),
+        "renamed-to subtree must diff as added: {kinds:?}"
+    );
+
+    // Apply: host reflects the rename; no duplicated subtree remains.
+    env.cowt_ok(&["apply", &id]);
+    assert!(
+        !app.join("logs").exists(),
+        "apply must remove the renamed-away subtree from the host"
+    );
+    assert_eq!(
+        fs::read_to_string(app.join("logs2/session.log")).unwrap(),
+        "session\n"
+    );
     env.cowt_ok(&["drop", &id]);
 }

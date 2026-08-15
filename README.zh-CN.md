@@ -117,6 +117,9 @@ CI 基线：**12/12 全绿** —— rustfmt、clippy `-D warnings`、三平台�
   运行中 apply 会被拒绝（规划前后各检查一次）
 - **Windows 同卷限制**：状态目录（`COWT_HOME`，默认 `%LOCALAPPDATA%\cowt`）必须与
   目标目录同卷（Windows 不能跨卷 rename）；`cowt run` 会给出明确报错
+- **Windows：`std::fs::remove_dir_all` 在视图上失败**（`ERROR_INVALID_NAME`——
+  std 用 `FILE_OPEN_REPARSE_POINT` 打开目录，WinFsp 对非 reparse 路径拒绝）；
+  cmd/资源管理器/PowerShell 等真实删除路径正常；Rust 程序应枚举目录逐项删除
 
 ## 性能
 
