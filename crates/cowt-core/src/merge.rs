@@ -263,26 +263,15 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
         }
     }
 
-    // Phase 2: commit. Create dirs, rename staged files, write symlinks, then
-    // apply deletions deepest-first.
+    // Phase 2: commit. Deletions run BEFORE renames so that a delete+write
+    // pair that resolves to the same file on a case-insensitive volume
+    // (delete `cache.bin`, recreate `CACHE.BIN`) does not remove the freshly
+    // written file. Staged bodies are independent of the host, so deleting
+    // first cannot lose data; rename's create_dir_all covers missing parents.
     for op in &plan.operations {
         if let Operation::Mkdir { path } = op {
             let dest = target_root.join(path);
             fs::create_dir_all(&dest).map_err(|e| Error::io(dest.clone(), e))?;
-            report.written += 1;
-        }
-    }
-    for (staged_file, dest) in &staged {
-        if let Some(p) = dest.parent() {
-            fs::create_dir_all(p).map_err(|e| Error::io(p.to_path_buf(), e))?;
-        }
-        commit_rename(staged_file, dest)?;
-        report.written += 1;
-    }
-    for op in &plan.operations {
-        if let Operation::WriteSymlink { path, target } = op {
-            let dest = target_root.join(path);
-            write_symlink(target, &dest)?;
             report.written += 1;
         }
     }
@@ -304,6 +293,20 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
                 }
                 Err(_) => {} // already gone
             }
+        }
+    }
+    for (staged_file, dest) in &staged {
+        if let Some(p) = dest.parent() {
+            fs::create_dir_all(p).map_err(|e| Error::io(p.to_path_buf(), e))?;
+        }
+        commit_rename(staged_file, dest)?;
+        report.written += 1;
+    }
+    for op in &plan.operations {
+        if let Operation::WriteSymlink { path, target } = op {
+            let dest = target_root.join(path);
+            write_symlink(target, &dest)?;
+            report.written += 1;
         }
     }
     // Prune directories left empty by deletions (deepest first), but never the

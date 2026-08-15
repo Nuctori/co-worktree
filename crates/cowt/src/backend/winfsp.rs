@@ -176,6 +176,10 @@ impl Backend for WinFspBackend {
             vp.filesystem_name("cowt")
                 .post_cleanup_when_modified_only(true)
                 .unicode_on_disk(true)
+                // Preserve the caller's spelling: without this WinFsp may
+                // normalize callback names to uppercase, which would break
+                // exact-name matching against the (lowercase) base manifest.
+                .case_preserved_names(true)
                 // No attribute caching: a deleted file must disappear from
                 // GetFileAttributes immediately (the default 1s timeout made
                 // e2e deletions visible only after a delay).
@@ -573,10 +577,12 @@ impl CowFs {
         Ok(())
     }
 
-    /// Remove the whiteout for `rel` and every ancestor, if any
-    /// (case-insensitively): recreating a path clears the shadow so lower
-    /// entries become visible again (overlayfs semantics without opaque
-    /// markers).
+    /// Remove the whiteout for `rel` and every ancestor, if any: recreating
+    /// a path clears the shadow so lower entries become visible again
+    /// (overlayfs semantics without opaque markers). Exact-name matching:
+    /// deleting `cache.bin` and recreating `CACHE.BIN` is a *different*
+    /// spelling, so the old whiteout stays and diff reports D+A (the volume
+    /// preserves spelling with `case_preserved_names`).
     fn clear_whiteout(&self, rel: &Path) {
         let mut cur = rel;
         loop {
@@ -584,13 +590,12 @@ impl CowFs {
                 (Some(p), Some(n)) if !cur.as_os_str().is_empty() => (p, n),
                 _ => return,
             };
-            let needle = name.to_string_lossy().to_lowercase();
             if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
                 for e in rd.flatten() {
                     let n = e.file_name();
                     let s = n.to_string_lossy();
                     if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
-                        if victim.to_lowercase() == needle {
+                        if victim == name.to_string_lossy() {
                             let _ = fs::remove_file(e.path());
                         }
                     }

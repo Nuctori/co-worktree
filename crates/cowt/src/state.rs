@@ -284,7 +284,10 @@ mod tests {
 
     #[test]
     fn default_name_slug() {
-        assert_eq!(default_name(Path::new("/home/u/.config/Code")), "config-Code");
+        assert_eq!(
+            default_name(Path::new("/home/u/.config/Code")),
+            "config-Code"
+        );
         assert_eq!(default_name(Path::new("/")), "worktree");
     }
 }

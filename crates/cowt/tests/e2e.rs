@@ -1054,16 +1054,14 @@ fn e2e_apply_diff_refused_while_running() {
     // diff while running: refused.
     let out = env.cowt().args(["diff", &id, "--json"]).output().unwrap();
     assert!(
-        !out.status.success()
-            && String::from_utf8_lossy(&out.stderr).contains("is running"),
+        !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("is running"),
         "diff while running must be refused: {}",
         String::from_utf8_lossy(&out.stderr)
     );
     // apply while running: refused.
     let out = env.cowt().args(["apply", &id]).output().unwrap();
     assert!(
-        !out.status.success()
-            && String::from_utf8_lossy(&out.stderr).contains("is running"),
+        !out.status.success() && String::from_utf8_lossy(&out.stderr).contains("is running"),
         "apply while running must be refused: {}",
         String::from_utf8_lossy(&out.stderr)
     );
@@ -1244,8 +1242,6 @@ fn e2e_dir_rename() {
     assert_mount_gone(&app);
 
     // Diff: source subtree deleted, destination added.
-
-    // Diff: source subtree deleted, destination added.
     let json = env.cowt_ok(&["diff", &id, "--json"]);
     let kinds: HashMap<String, String> = parse_changes(&json).into_iter().collect();
     assert_eq!(
@@ -1268,6 +1264,63 @@ fn e2e_dir_rename() {
     assert_eq!(
         fs::read_to_string(app.join("logs2/session.log")).unwrap(),
         "session\n"
+    );
+    env.cowt_ok(&["drop", &id]);
+}
+
+/// Adversarial: case-different recreate. Deleting `cache.bin` and recreating
+/// `CACHE.BIN` must diff as *modified* (not added+deleted): the volume is
+/// case-insensitive, and both spellings denote the same manifest entry.
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_case_recreate() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let (app, id) = seeded_app(&env);
+
+    let mut sleeper = spawn_sleeper(&env, &id, 6);
+    fs::remove_file(app.join("cache.bin")).unwrap();
+    fs::write(app.join("CACHE.BIN"), "reborn-case\n").unwrap();
+    assert_eq!(
+        fs::read_to_string(app.join("CACHE.BIN")).unwrap(),
+        "reborn-case\n"
+    );
+    wait_run(&mut sleeper);
+    assert_mount_gone(&app);
+
+    // NTFS preserves spelling: recreating with a different case is a real
+    // rename (added CACHE.BIN + deleted cache.bin) — and crucially, apply
+    // must converge the host content without ghost files.
+    let json = env.cowt_ok(&["diff", &id, "--json"]);
+    let kinds: HashMap<String, String> = parse_changes(&json).into_iter().collect();
+    assert_eq!(
+        kinds.get("cache.bin").map(String::as_str),
+        Some("deleted"),
+        "case-different recreate must diff the old spelling as deleted: {kinds:?}"
+    );
+    assert_eq!(
+        kinds.get("CACHE.BIN").map(String::as_str),
+        Some("added"),
+        "case-different recreate must diff the new spelling as added: {kinds:?}"
+    );
+
+    env.cowt_ok(&["apply", &id]);
+    assert_eq!(
+        fs::read_to_string(app.join("cache.bin")).unwrap(),
+        "reborn-case\n",
+        "apply must update the host file (case-insensitive read)"
+    );
+    let upper_files: Vec<String> = fs::read_dir(env.upper_of(&id))
+        .unwrap()
+        .flatten()
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        upper_files.iter().filter(|n| n.to_lowercase() == "cache.bin").count(),
+        1,
+        "no ghost entries in upper after apply: {upper_files:?}"
     );
     env.cowt_ok(&["drop", &id]);
 }

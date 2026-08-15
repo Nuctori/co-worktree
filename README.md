@@ -140,6 +140,10 @@ Windows cross-compile check, release builds for all three.
   WinFsp rejects on non-reparse paths). Real-world deletion via
   cmd/explorer/PowerShell works normally; Rust programs should delete
   directory trees by enumerating and removing entries individually.
+- **Windows 8.3 short names**: operations through a 8.3 alias
+  (`REALLYL~1.TXT`) are not tracked (the manifest keys the long name);
+  whiteouts written under the short spelling are ignored. Modern APIs use
+  long names, so this only affects paths typed by hand.
 
 ## Performance
 
