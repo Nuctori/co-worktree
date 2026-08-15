@@ -285,8 +285,8 @@ impl Filesystem for CowFs {
         _uid: Option<u32>,
         _gid: Option<u32>,
         size: Option<u64>,
-        _atime: Option<SystemTime>,
-        _mtime: Option<SystemTime>,
+        _atime: Option<fuser::TimeOrNow>,
+        _mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<SystemTime>,
         fh: Option<u64>,
         _crtime: Option<SystemTime>,
@@ -472,6 +472,7 @@ impl Filesystem for CowFs {
         offset: i64,
         size: u32,
         _flags: i32,
+        _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
         let Some(Handle::File(f)) = self.fhs.lock().unwrap().get(&fh).map(|h| h) else {
@@ -494,7 +495,9 @@ impl Filesystem for CowFs {
         fh: u64,
         offset: i64,
         data: &[u8],
+        _write_flags: u32,
         _flags: i32,
+        _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
         let Some(Handle::File(f)) = self.fhs.lock().unwrap().get(&fh).map(|h| h) else {
@@ -523,7 +526,7 @@ impl Filesystem for CowFs {
         _ino: u64,
         fh: u64,
         _flags: i32,
-        _lock_owner: u64,
+        _lock_owner: Option<u64>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {

@@ -170,7 +170,7 @@ pub fn default_backend() -> Box<dyn Backend> {
     }
     #[cfg(target_os = "macos")]
     {
-        Box::new(macos::Union)
+        Box::new(macos::FuseT)
     }
     #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
     {

@@ -124,6 +124,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y libclang-17-dev gcc-mingw-w64-x86-64
+          # bindgen looks for the exact name libclang.so; the .so.1 from the
+          # package is not enough, and the fallback is the system llvm-18
+          # whose mmintrin.h conflicts with the mingw headers.
+          sudo ln -sf /usr/lib/llvm-17/lib/libclang.so.1 \
+            /usr/lib/llvm-17/lib/libclang.so
       - name: Cross-compile check
         env:
           LIBCLANG_PATH: /usr/lib/llvm-17/lib
