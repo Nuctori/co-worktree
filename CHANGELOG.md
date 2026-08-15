@@ -50,8 +50,10 @@ All notable changes to co-worktree are documented here.
   (FlushFileBuffers denies on read-only handles).
 - Windows `pid_alive` distinguishes `ERROR_ACCESS_DENIED` (protected
   process, alive) from `ERROR_INVALID_PARAMETER` (no such pid).
-- `cowt drop --force` only unmounts mounts proven to be our own stale
   leftovers; foreign mounts are refused even with `--force`.
+
+### Known limitations
+
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX
   programs work normally. FUSE-T's NFS mount does not come up on headless
   GitHub Actions runners (fuse_mount returns but the mount never appears in
