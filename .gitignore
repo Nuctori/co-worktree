@@ -6,3 +6,4 @@ Cargo.lock.bak
 /.pi/
 /.pi-subagents/
 /.audits/
+/.orchestra/
