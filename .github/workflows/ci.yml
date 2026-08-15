@@ -133,7 +133,7 @@ jobs:
         env:
           LIBCLANG_PATH: /usr/lib/llvm-17/lib
           BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc: >-
-            -I/usr/x86_64-w64-mingw32/include
+            -I/usr/x86_64-w64-mingw32/include -DMMINTRIN_H
         run: cargo check --workspace --all-targets --target ${{ matrix.target }}
 
   release-binary:
@@ -148,6 +148,11 @@ jobs:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
       - uses: Swatinem/rust-cache@v2
+      # fuser's build.rs probes pkg-config 'fuse' on macOS; without FUSE-T
+      # the crate does not compile at all.
+      - name: Install FUSE-T (macOS build dependency)
+        if: runner.os == 'macOS'
+        run: bash scripts/macos/install-fuse-t.sh
       - run: cargo build --release
       - name: Smoke test the binary
         run: |
