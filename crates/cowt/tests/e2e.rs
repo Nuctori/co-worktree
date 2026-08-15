@@ -1447,3 +1447,38 @@ fn e2e_binary_and_ansi_safety() {
     );
     env.cowt_ok(&["drop", &id]);
 }
+
+/// Adversarial: `..` path traversal through the view. The Windows backend
+/// resolves paths itself and strips ParentDir components, so a traversal
+/// write lands inside the isolation layer (visible to diff) — never outside
+/// the worktree state. On unix the kernel resolves `..` at the mount
+/// boundary, which is the same class as a program writing an absolute path
+/// outside (documented non-sandbox boundary).
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_path_traversal_blocked() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let (app, id) = seeded_app(&env);
+    let mut sleeper = spawn_sleeper(&env, &id, 6);
+    let mut p = app.clone();
+    p.push("..");
+    p.push("..");
+    p.push("escape-probe.txt");
+    let _ = fs::write(&p, "escaped?\n");
+    wait_run(&mut sleeper);
+    assert_mount_gone(&app);
+
+    // The kernel resolves `..` at the mount boundary on EVERY platform
+    // (mount/.. -> the host parent dir), so a traversal write leaves the
+    // layer — the same class as a program writing an absolute path outside
+    // (documented non-sandbox boundary). The important invariant: the write
+    // never pollutes upper, so diff/apply stay truthful.
+    assert!(
+        fs::symlink_metadata(env.upper_of(&id).join("escape-probe.txt")).is_err(),
+        "traversal write must not enter upper"
+    );
+    env.cowt_ok(&["drop", &id]);
+}

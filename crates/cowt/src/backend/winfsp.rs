@@ -626,13 +626,23 @@ fn to_filetime(t: Option<SystemTime>) -> u64 {
 }
 
 /// Volume-relative name ("\a\b.txt") -> relative path ("a\b.txt").
+///
+/// `ParentDir` components are dropped: WinFsp passes paths the kernel has
+/// already normalized, but a hostile program can still open
+/// `mount\..\..\outside` and expect the OS to resolve it. Since we resolve
+/// every path against upper/lower ourselves, letting `..` through would
+/// escape the isolation layer entirely (write/read outside, silent host
+/// tampering while the dir is moved aside). Refusing it mirrors what the
+/// kernel does for a real FS boundary.
 fn rel_of(name: &U16CStr) -> PathBuf {
     let p = PathBuf::from(name.to_os_string());
     p.components()
         .filter(|c| {
             !matches!(
                 c,
-                std::path::Component::Prefix(_) | std::path::Component::RootDir
+                std::path::Component::Prefix(_)
+                    | std::path::Component::RootDir
+                    | std::path::Component::ParentDir
             )
         })
         .collect()

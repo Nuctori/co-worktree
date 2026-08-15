@@ -144,6 +144,11 @@ Windows cross-compile check, release builds for all three.
   (`REALLYL~1.TXT`) are not tracked (the manifest keys the long name);
   whiteouts written under the short spelling are ignored. Modern APIs use
   long names, so this only affects paths typed by hand.
+- **`..` past the mount boundary leaves the layer** (all platforms): the
+  kernel resolves `mount/..` to the host parent dir, so a traversal write
+  bypasses isolation — the same class as a program writing any absolute
+  path outside. Not a sandbox; `upper` is never polluted, so diff/apply
+  stay truthful.
 
 ## Performance
 
