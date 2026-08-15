@@ -526,7 +526,10 @@ fn e2e_10k_diff_budget() {
     let mut sleeper = spawn_sleeper(&env, &big_id, 8);
     for d in 1..=50 {
         let f = big.join(format!("d{d}/f{d}.txt"));
-        let mut fh = fs::OpenOptions::new().append(true).open(&f).unwrap();
+        let mut fh = fs::OpenOptions::new()
+            .append(true)
+            .open(&f)
+            .expect("open through view");
         writeln!(fh, "change").unwrap();
     }
     wait_run(&mut sleeper);

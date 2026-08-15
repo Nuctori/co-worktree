@@ -450,6 +450,10 @@ impl Filesystem for CowFs {
         };
         let wants_write =
             flags & (libc::O_WRONLY | libc::O_RDWR | libc::O_TRUNC | libc::O_APPEND) != 0;
+        eprintln!(
+            "cowt: dbg open(ino={ino}, rel={:?}, flags={flags:#x}, write={wants_write})",
+            rel
+        );
         let path = match self.resolve(&rel) {
             Some(p) => p,
             None => return reply.error(libc::ENOENT),
@@ -512,8 +516,10 @@ impl Filesystem for CowFs {
     ) {
         let lock = self.fhs.lock().unwrap();
         let Some(Handle::File(f)) = lock.get(&fh) else {
+            eprintln!("cowt: dbg write fh {fh} not found");
             return reply.error(libc::EBADF);
         };
+        eprintln!("cowt: dbg write fh={fh} offset={offset} len={}", data.len());
         match f.write_at(data, offset.max(0) as u64) {
             Ok(n) => reply.written(n as u32),
             Err(e) => reply.error(e.raw_os_error().unwrap_or(libc::EIO)),
