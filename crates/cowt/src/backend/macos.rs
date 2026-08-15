@@ -27,6 +27,7 @@ use std::collections::HashMap;
 use std::ffi::OsStr;
 use std::fs;
 use std::io;
+use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::FileExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -298,24 +299,32 @@ impl Filesystem for CowFs {
         // Truncation is the only attribute cowt needs.
         if let Some(size) = size {
             let truncated = if let Some(fh) = fh {
-                self.fhs.lock().unwrap().get(&fh).and_then(|h| match h {
-                    Handle::File(f) => Some(f.set_len(size)),
-                    Handle::Dir => None,
-                })
+                let lock = self.fhs.lock().unwrap();
+                match lock.get(&fh) {
+                    Some(Handle::File(f)) => Some(f.set_len(size)),
+                    _ => None,
+                }
             } else {
                 // Inode-based truncate without a handle: ensure the file is
                 // in upper first (never touch the host dir).
                 let rel = self.inos.lock().unwrap().path_of(ino);
-                rel.map(|rel| {
-                    let up = self.upper_of(&rel);
-                    if fs::symlink_metadata(&up).is_err() {
-                        let _ = self.copy_up(&rel);
+                match rel {
+                    Some(rel) => {
+                        let up = self.upper_of(&rel);
+                        if fs::symlink_metadata(&up).is_err() {
+                            let _ = self.copy_up(&rel);
+                        }
+                        Some(
+                            fs::OpenOptions::new()
+                                .write(true)
+                                .open(&up)
+                                .and_then(|f| f.set_len(size)),
+                        )
                     }
-                    fs::OpenOptions::new().write(true).open(&up)
-                })
-                .and_then(|r| r.map(|f| f.set_len(size)))
+                    None => None,
+                }
             };
-            if let Err(e) = truncated {
+            if let Some(Err(e)) = truncated {
                 return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
             }
         }
@@ -475,7 +484,8 @@ impl Filesystem for CowFs {
         _lock_owner: Option<u64>,
         reply: ReplyData,
     ) {
-        let Some(Handle::File(f)) = self.fhs.lock().unwrap().get(&fh).map(|h| h) else {
+        let lock = self.fhs.lock().unwrap();
+        let Some(Handle::File(f)) = lock.get(&fh) else {
             return reply.error(libc::EBADF);
         };
         let mut buf = vec![0u8; size as usize];
@@ -500,7 +510,8 @@ impl Filesystem for CowFs {
         _lock_owner: Option<u64>,
         reply: ReplyWrite,
     ) {
-        let Some(Handle::File(f)) = self.fhs.lock().unwrap().get(&fh).map(|h| h) else {
+        let lock = self.fhs.lock().unwrap();
+        let Some(Handle::File(f)) = lock.get(&fh) else {
             return reply.error(libc::EBADF);
         };
         match f.write_at(data, offset.max(0) as u64) {
@@ -609,9 +620,9 @@ impl Filesystem for CowFs {
 
     fn statfs(&mut self, _req: &Request<'_>, _ino: u64, reply: ReplyStatfs) {
         let mut vfs = std::mem::MaybeUninit::<libc::statvfs>::uninit();
-        let ok = unsafe { libc::statvfs(self.upper.as_ptr(), vfs.as_mut_ptr()) == 0 };
+        let ok = unsafe { libc::statvfs(self.upper.as_os_str().as_ptr(), vfs.as_mut_ptr()) == 0 };
         if !ok {
-            reply.statfs(0, 0, 0, 0, 0, 512, 255, 0, 0);
+            reply.statfs(0, 0, 0, 0, 0, 512, 255, 0);
             return;
         }
         let v = unsafe { vfs.assume_init() };
@@ -624,7 +635,6 @@ impl Filesystem for CowFs {
             v.f_frsize as u32,
             v.f_namemax as u32,
             v.f_frsize as u32,
-            0,
         );
     }
 
@@ -670,7 +680,7 @@ impl Filesystem for CowFs {
         let fh = self.next_fh.fetch_add(1, Ordering::Relaxed) + 2;
         self.fhs.lock().unwrap().insert(fh, Handle::File(f));
         match self.attr_of(&rel) {
-            Ok(attr) => reply.created(&ttl(), &attr, fh, 0),
+            Ok(attr) => reply.created(&ttl(), &attr, 0, fh, 0),
             Err(_) => reply.error(libc::EIO),
         }
     }
