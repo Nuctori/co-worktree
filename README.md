@@ -125,8 +125,9 @@ Windows cross-compile check, release builds for all three.
 - **Symlinks are not isolated**: a link inside the forked directory is
   followed by the merged view — writes through it reach the host target
   directly and are invisible to `cowt diff`. `fork` prints a warning when
-  it detects symlinks. (Windows/macOS backends contain the write via
-  copy-up, but link semantics are not preserved.)
+  it detects symlinks. (The Windows backend contains the write via
+  copy-up — junction targets are copied, not followed; on Unix and macOS
+  the kernel resolves the link at the VFS boundary, same as Linux.)
 - **`apply` is conflict-gated, not transactional**: per-file renames are
   atomic, but a multi-file apply interrupted mid-way (crash, power loss)
   leaves the already-written files in place — each file is individually

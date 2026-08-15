@@ -85,9 +85,15 @@ pub fn fork(args: ForkArgs) -> Result<()> {
     if let Some(n) = &meta.name {
         println!("  name:    {n}");
     }
-    println!("  target:  {}", target.display());
+    println!(
+        "  target:  {}",
+        crate::state::sanitize_display(&target.display().to_string())
+    );
     println!("  backend: {}", meta.backend);
-    println!("  state:   {}", dir.display());
+    println!(
+        "  state:   {}",
+        crate::state::sanitize_display(&dir.display().to_string())
+    );
     println!(
         "  base:    {} entries ({} files) scanned in {:.0}ms",
         scan.manifest.entries.len(),
@@ -103,7 +109,10 @@ pub fn fork(args: ForkArgs) -> Result<()> {
     if !scan.warnings.is_empty() {
         println!("  warnings: {} entr(y/ies) skipped:", scan.warnings.len());
         for (p, why) in scan.warnings.iter().take(5) {
-            println!("    - {}: {why}", p.display());
+            println!(
+                "    - {}: {why}",
+                crate::state::sanitize_display(&p.display().to_string())
+            );
         }
     }
     println!(

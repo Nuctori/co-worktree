@@ -61,7 +61,9 @@ pub trait Backend: Send + Sync {
             .args(&cmd[1..])
             .spawn()
             .map_err(|e| anyhow::anyhow!("spawn '{}': {e}", cmd[0]))?;
-        write_pidfile(pidfile, child.id())?;
+        write_pidfile(pidfile, child.id()).inspect_err(|_| {
+            reap_orphan_child(&mut child);
+        })?;
         let result = child.wait();
         // Kernel overlayfs renames a lower directory lazily: upper/ holds the
         // renamed dir but its children stay un-materialized (resolved through
@@ -136,6 +138,10 @@ pub(crate) fn materialize_lazy_upper(view: &Path, upper: &Path) -> std::io::Resu
 /// the check-then-write window is refused instead of silently overwriting
 /// the first run's pidfile (which would break every stale-run gate). A
 /// pidfile whose pid is dead is stale and gets replaced.
+///
+/// On failure the caller must kill/wait the already-spawned child (the
+/// spawn happens before this call; an untracked leftover would keep
+/// running against the shared upper).
 pub(crate) fn write_pidfile(path: &Path, pid: u32) -> std::io::Result<()> {
     let start = process_starttime(pid);
     let body = match start {
@@ -169,6 +175,14 @@ pub(crate) fn write_pidfile(path: &Path, pid: u32) -> std::io::Result<()> {
         }
         Err(e) => Err(e),
     }
+}
+
+/// Reap an already-spawned child when the pidfile race was lost: without
+/// this the loser's process keeps running untracked against the shared
+/// upper after the caller returns the error.
+pub(crate) fn reap_orphan_child(child: &mut std::process::Child) {
+    let _ = child.kill();
+    let _ = child.wait();
 }
 
 /// Process start time in a comparable form: unix = starttime field of

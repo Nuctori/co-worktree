@@ -947,6 +947,16 @@ impl Backend for FuseT {
             real: state.parent().unwrap_or(Path::new("")).join("real"),
             view: state.clone(),
         };
+        // The state dir was deleted from under the running worktree
+        // (external `rm -rf state/<id>`): the moved-aside host dir is gone
+        // with it. Never silent.
+        if !layout.real.exists() {
+            eprintln!(
+                "cowt: ERROR: worktree state was deleted while running; \
+                 the host directory at {} may have been lost",
+                mountpoint.display()
+            );
+        }
         let _ = fs::remove_dir_all(&state);
         fs::remove_file(mountpoint)
             .with_context(|| format!("remove symlink at {}", mountpoint.display()))?;

@@ -201,6 +201,21 @@ impl State {
     }
 }
 
+/// Terminal-safe rendering: control bytes (other than tab/CR/LF) become
+/// U+FFFD so hostile file names or contents cannot inject ANSI/OSC
+/// sequences via cowt's human output.
+pub fn sanitize_display(s: &str) -> String {
+    s.chars()
+        .map(|c| {
+            if c.is_control() && !matches!(c, '\t' | '\n' | '\r') {
+                '\u{FFFD}'
+            } else {
+                c
+            }
+        })
+        .collect()
+}
+
 /// Atomic file write: temp file + rename (same filesystem). A kill -9
 /// mid-write leaves the old file intact instead of a truncated JSON that
 /// would brick the worktree (drop included).

@@ -28,10 +28,11 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
 
     let base = State::load_manifest(&dir)?;
     let upper = dir.join("upper");
-    let current = match Manifest::rescan(&meta.target, &base) {
-        Ok(s) => s.manifest,
-        Err(_) => Manifest::scan(&meta.target)?.manifest,
-    };
+    // Full re-hash of the host: `rescan`'s stat_eq fast path reuses the base
+    // hash when size/mtime match, but an external tool can rewrite a file
+    // preserving both (touch -r, rsync -t, FAT 2s mtime granularity) — a
+    // silent overwrite of that change by apply would lose data.
+    let current = Manifest::scan(&meta.target)?.manifest;
     let work = overlay::effective_manifest(&base, &upper)?;
 
     let plan = merge::plan(&base, &current, &work, &upper);
@@ -63,7 +64,7 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
                 eprintln!(
                     "  conflict [{}] {} (base={}, current={}, worktree={})",
                     serde_json::to_string(&c.kind)?.trim_matches('"'),
-                    c.path.display(),
+                    crate::state::sanitize_display(&c.path.display().to_string()),
                     c.base_hash.as_deref().unwrap_or("-"),
                     c.current_hash.as_deref().unwrap_or("-"),
                     c.work_hash.as_deref().unwrap_or("-"),
@@ -127,12 +128,25 @@ fn print_plan(plan: &merge::MergePlan) {
     );
     for op in &plan.operations {
         match op {
-            merge::Operation::WriteFile { path, .. } => println!("  write  {}", path.display()),
+            merge::Operation::WriteFile { path, .. } => println!(
+                "  write  {}",
+                crate::state::sanitize_display(&path.display().to_string())
+            ),
             merge::Operation::WriteSymlink { path, target } => {
-                println!("  symlink {} -> {}", path.display(), target.display())
+                println!(
+                    "  symlink {} -> {}",
+                    crate::state::sanitize_display(&path.display().to_string()),
+                    crate::state::sanitize_display(&target.display().to_string())
+                )
             }
-            merge::Operation::Mkdir { path } => println!("  mkdir  {}", path.display()),
-            merge::Operation::Delete { path } => println!("  delete {}", path.display()),
+            merge::Operation::Mkdir { path } => println!(
+                "  mkdir  {}",
+                crate::state::sanitize_display(&path.display().to_string())
+            ),
+            merge::Operation::Delete { path } => println!(
+                "  delete {}",
+                crate::state::sanitize_display(&path.display().to_string())
+            ),
         }
     }
     for c in &plan.conflicts {

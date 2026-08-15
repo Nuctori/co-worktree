@@ -1544,3 +1544,96 @@ fn e2e_symlink_ring_no_crash() {
     );
     env.cowt_ok(&["drop", &id]);
 }
+
+/// Adversarial: external tool rewrites a host file preserving size AND
+/// mtime (touch -r, rsync -t, FAT granularity). apply must still detect the
+/// drift (conflict) instead of silently overwriting the external change.
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_stat_eq_external_rewrite_conflicts() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let (app, id) = seeded_app(&env);
+
+    // Simulate the external rewrite after fork, before run: same size,
+    // same mtime (touch -r semantics).
+    {
+        let p = app.join("settings.txt");
+        let before = fs::metadata(&p).unwrap();
+        let before_mtime = before.modified().unwrap();
+        fs::write(&p, "aaaa\ncccc\n").unwrap(); // same size as "line1\nline2\nline3\n"
+        let t = filetime_from_systemtime(before_mtime);
+        set_file_mtime(&p, t);
+    }
+
+    // Worktree change on the same file.
+    let mut sleeper = spawn_sleeper(&env, &id, 6);
+    fs::write(app.join("settings.txt"), "WWWW\nWWWW\nWWWW\n").unwrap();
+    wait_run(&mut sleeper);
+    assert_mount_gone(&app);
+
+    // apply must CONFLICT (host was modified externally), never silently
+    // overwrite the external edit.
+    let out = env.cowt().args(["apply", &id]).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "apply must refuse: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("conflict"), "expected conflict: {err}");
+    // Host untouched: the external rewrite survives.
+    assert_eq!(
+        fs::read_to_string(app.join("settings.txt")).unwrap(),
+        "aaaa\ncccc\n",
+        "external rewrite must survive the refused apply"
+    );
+    env.cowt_ok(&["drop", &id]);
+}
+
+#[cfg(windows)]
+fn filetime_from_systemtime(t: std::time::SystemTime) -> u64 {
+    let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    let secs = dur.as_secs() as i128 + 11_644_473_600;
+    let sub = dur.subsec_nanos() as i128 / 100;
+    ((secs * 10_000_000 + sub) as u64)
+}
+
+#[cfg(unix)]
+fn filetime_from_systemtime(t: std::time::SystemTime) -> (i64, i64) {
+    let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
+    (dur.as_secs() as i64, dur.subsec_nanos() as i64)
+}
+
+#[cfg(unix)]
+fn set_file_mtime(p: &std::path::Path, t: (i64, i64)) {
+    use std::os::unix::fs::PermissionsExt;
+    let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o644));
+    let f = std::fs::OpenOptions::new().write(true).open(p).unwrap();
+    let ft = std::fs::FileTimes::new()
+        .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(t.0 as u64));
+    let _ = f.set_times(ft);
+}
+
+#[cfg(windows)]
+fn set_file_mtime(p: &std::path::Path, t: u64) {
+    use std::os::windows::fs::OpenOptionsExt;
+    use windows::Win32::Foundation::FILETIME;
+    use windows::Win32::Foundation::HANDLE;
+    use windows::Win32::Storage::FileSystem::SetFileTime;
+    let f = std::fs::OpenOptions::new()
+        .write(true)
+        .custom_flags(0x02000000 /* FILE_FLAG_BACKUP_SEMANTICS */)
+        .open(p)
+        .unwrap();
+    let handle = HANDLE(std::os::windows::io::AsRawHandle::as_raw_handle(&f) as *mut _);
+    let ft = FILETIME {
+        dwLowDateTime: (t & 0xFFFF_FFFF) as u32,
+        dwHighDateTime: (t >> 32) as u32,
+    };
+    unsafe {
+        let _ = SetFileTime(handle, Some(&ft), None, None);
+    }
+}

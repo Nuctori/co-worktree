@@ -39,16 +39,13 @@ pub fn diff_cmd(args: DiffArgs) -> Result<()> {
         // snapshotted at fork time (metadata only), so the base side is read
         // from the live target — but only when the live file is provably
         // identical to the fork-time snapshot (hash match).
-        let current = Manifest::rescan(&meta.target, &base)
-            .map(|s| s.manifest)
-            .ok();
+        let current = Manifest::scan(&meta.target)?.manifest;
         for ch in changes.iter_mut() {
             if ch.kind != ChangeKind::Modified {
                 continue;
             }
             let base_body_valid = current
-                .as_ref()
-                .and_then(|c| c.get(&ch.path))
+                .get(&ch.path)
                 .zip(base.get(&ch.path))
                 .map(|(c, b)| c.content_eq(b))
                 .unwrap_or(false);
@@ -114,7 +111,10 @@ fn print_human(changes: &[Change], stat: bool) {
                 "D"
             }
         };
-        println!("{tag}  {}", ch.path.display());
+        println!(
+            "{tag}  {}",
+            crate::state::sanitize_display(&ch.path.display().to_string())
+        );
         if !stat {
             match &ch.detail {
                 Some(ContentDiff::Text { unified }) => {

@@ -226,12 +226,27 @@ impl Backend for WinFspBackend {
         // with its host process; here we only clear the mountpoint residue and
         // move the host dir back.
         cleanup_mountpoint(mountpoint)?;
-        if let Some(real) = find_real_for(mountpoint) {
-            let layout = Layout {
-                real,
-                view: PathBuf::new(),
-            };
-            restore(mountpoint, &layout)?;
+        match find_real_for(mountpoint) {
+            Some(real) => {
+                let layout = Layout {
+                    real,
+                    view: PathBuf::new(),
+                };
+                restore(mountpoint, &layout)?;
+            }
+            None => {
+                // The state dir was deleted from under the running worktree
+                // (external `rm -rf state/<id>`): the moved-aside host dir is
+                // gone with it. Never silent — the user must know the host
+                // directory was lost, not see a clean "restored" exit.
+                if is_reparse(mountpoint) {
+                    eprintln!(
+                        "cowt: ERROR: worktree state was deleted while running; \
+                         the host directory at {} has been lost (mount point left behind)",
+                        mountpoint.display()
+                    );
+                }
+            }
         }
         Ok(())
     }
