@@ -122,6 +122,11 @@ Windows cross-compile check, release builds for all three.
 - **User-level directories only**: paths outside `$HOME` are refused by
   default (`--force-path` overrides)
 - **Windows registry**: not isolated (MVP: file-level config only)
+- **Symlinks are not isolated**: a link inside the forked directory is
+  followed by the merged view — writes through it reach the host target
+  directly and are invisible to `cowt diff`. `fork` prints a warning when
+  it detects symlinks. (Windows/macOS backends contain the write via
+  copy-up, but link semantics are not preserved.)
 - **Windows same-volume limit**: the state dir (`COWT_HOME`, default
   `%LOCALAPPDATA%\cowt`) must be on the same volume as the target (Windows
   cannot rename across volumes); `cowt run` reports a clear error otherwise

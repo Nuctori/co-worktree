@@ -75,6 +75,12 @@ pub fn fork(args: ForkArgs) -> Result<()> {
         .values()
         .filter(|e| e.kind == cowt_core::EntryKind::File)
         .count();
+    let symlinks = scan
+        .manifest
+        .entries
+        .values()
+        .filter(|e| e.kind == cowt_core::EntryKind::Symlink)
+        .count();
     println!("forked worktree {}", meta.id);
     if let Some(n) = &meta.name {
         println!("  name:    {n}");
@@ -88,6 +94,12 @@ pub fn fork(args: ForkArgs) -> Result<()> {
         files,
         scan_elapsed.as_secs_f64() * 1000.0
     );
+    if symlinks > 0 {
+        eprintln!(
+            "cowt: warning: {symlinks} symlink(s) detected — writes through them during `cowt run`\n\
+             reach the host target directly (not isolated, invisible to `cowt diff`)"
+        );
+    }
     if !scan.warnings.is_empty() {
         println!("  warnings: {} entr(y/ies) skipped:", scan.warnings.len());
         for (p, why) in scan.warnings.iter().take(5) {

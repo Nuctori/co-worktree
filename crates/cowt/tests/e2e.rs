@@ -958,3 +958,93 @@ fn e2e_crash_recovery_on_next_run() {
     let _ = env.cowt_ok(&["diff", &id, "--json"]);
     env.cowt_ok(&["drop", &id, "--force"]);
 }
+
+/// Adversarial: symlink write-through. A link inside the forked dir pointing
+/// outside is (a) reported at fork time, (b) followed by the merged view on
+/// unix (kernel overlayfs resolves links in the VFS — the write reaches the
+/// host target and is invisible to `cowt diff`), and (c) contained on
+/// Windows (copy-up copies the junction target's content into upper). This
+/// test pins the documented boundary rather than asserting isolation.
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_symlink_write_through() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let app = env.app_dir("symapp");
+    fs::create_dir_all(&app).unwrap();
+    let outside = env.tmp.path().join("sym-outside");
+    fs::create_dir_all(&outside).unwrap();
+    let link = app.join("escape");
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&outside, &link).is_ok();
+    #[cfg(windows)]
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&link)
+        .arg(&outside)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !made {
+        eprintln!("SKIP: cannot create symlink/junction on this host");
+        return;
+    }
+
+    // Fork warns about the link (honest boundary, no silent isolation gap).
+    let fork_out = env
+        .cowt()
+        .args(["fork", app.to_str().unwrap(), "--name", "symapp"])
+        .output()
+        .unwrap();
+    assert!(
+        fork_out.status.success(),
+        "fork failed: {}",
+        String::from_utf8_lossy(&fork_out.stderr)
+    );
+    let fork_err = String::from_utf8_lossy(&fork_out.stderr);
+    assert!(
+        fork_err.contains("symlink") && fork_err.contains("not isolated"),
+        "fork must warn about symlinks: {fork_err}"
+    );
+    let id = env.worktree_id("symapp");
+
+    let mut sleeper = spawn_sleeper(&env, &id, 6);
+    #[cfg(unix)]
+    {
+        fs::create_dir_all(app.join("escape/sub")).unwrap();
+        fs::write(app.join("escape/sub/leaked.txt"), "leak\n").unwrap();
+    }
+    #[cfg(windows)]
+    {
+        // The WinFsp backend does not follow junctions: the write is either
+        // contained or refused — either way the host target stays untouched.
+        let _ = fs::create_dir_all(app.join("escape/sub"));
+        let _ = fs::write(app.join("escape/sub/leaked.txt"), "leak\n");
+        assert!(
+            !outside.join("sub").exists() && !outside.join("leaked.txt").exists(),
+            "windows: junction write must not reach the host target"
+        );
+    }
+    wait_run(&mut sleeper);
+    wait_run(&mut sleeper);
+
+    #[cfg(unix)]
+    {
+        // VFS follows the link: the write reached the real host target.
+        assert_eq!(
+            fs::read_to_string(outside.join("sub/leaked.txt")).unwrap(),
+            "leak\n",
+            "unix: write through symlink must reach the host target (documented boundary)"
+        );
+    }
+
+    // The leaked write is invisible to diff (not in upper).
+    let json = env.cowt_ok(&["diff", &id, "--json"]);
+    assert!(
+        !json.contains("leaked"),
+        "leaked write must not appear in diff: {json}"
+    );
+    env.cowt_ok(&["drop", &id]);
+}

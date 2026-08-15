@@ -109,6 +109,9 @@ CI 基线：**12/12 全绿** —— rustfmt、clippy `-D warnings`、三平台�
 - **非沙箱**：不限制 CPU、内存、网络、进程间通信；不防恶意软件——只防副作用污染
 - **仅限用户级目录**：默认拒绝 `$HOME` 之外的路径（`--force-path` 可覆盖）
 - **Windows 注册表**：MVP 不隔离，仅文件级配置
+- **符号链接不隔离**：fork 目录内的链接会被合并视图跟随——通过它写入直接落到宿主
+  目标，且 `cowt diff` 不可见；fork 检测到 symlink 时会打印警告（Windows/macOS
+  后端经 copy-up 将写入包含进隔离层，但不保留链接语义）
 - **Windows 同卷限制**：状态目录（`COWT_HOME`，默认 `%LOCALAPPDATA%\cowt`）必须与
   目标目录同卷（Windows 不能跨卷 rename）；`cowt run` 会给出明确报错
 
