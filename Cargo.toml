@@ -2,6 +2,12 @@
 resolver = "2"
 members = ["crates/cowt-core", "crates/cowt"]
 
+# Vendored winfsp-sys without bindgen (see third_party/winfsp-sys/build.rs):
+# bindgen cross-compiling to Windows on Linux hosts is a dependency hell
+# (libclang + mingw headers + llvm mmintrin conflicts).
+[patch.crates-io]
+winfsp-sys = { path = "third_party/winfsp-sys" }
+
 [workspace.package]
 version = "0.1.0"
 edition = "2021"

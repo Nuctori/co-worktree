@@ -116,24 +116,9 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      # winfsp-sys regenerates its bindings with bindgen at build time; for
-      # the windows target, clang needs the mingw-w64 Windows SDK headers.
-      # clang 17 is pinned: llvm-18's mmintrin.h conflicts with mingw headers
-      # (incompatible vector types) while cross-parsing windows.h.
-      - name: Install libclang-17 + mingw headers (bindgen)
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y libclang-17-dev gcc-mingw-w64-x86-64
-          # bindgen looks for the exact name libclang.so; the .so.1 from the
-          # package is not enough, and the fallback is the system llvm-18
-          # whose mmintrin.h conflicts with the mingw headers.
-          sudo ln -sf /usr/lib/llvm-17/lib/libclang.so.1 \
-            /usr/lib/llvm-17/lib/libclang.so
+      # winfsp-sys is vendored with pre-generated bindings (no bindgen),
+      # so this job needs no libclang / mingw headers anymore.
       - name: Cross-compile check
-        env:
-          LIBCLANG_PATH: /usr/lib/llvm-17/lib
-          BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc: >-
-            -I/usr/x86_64-w64-mingw32/include -DMMINTRIN_H
         run: cargo check --workspace --all-targets --target ${{ matrix.target }}
 
   release-binary:
@@ -155,9 +140,11 @@ jobs:
         run: bash scripts/macos/install-fuse-t.sh
       - run: cargo build --release
       - name: Smoke test the binary
+        # The binary links FUSE-T's libfuse-t.dylib (rpath not embedded in
+        # release builds); point dyld at the install location.
         run: |
-          ./target/release/cowt --version
-          ./target/release/cowt doctor || true
+          DYLD_LIBRARY_PATH=/usr/local/lib ./target/release/cowt --version
+          DYLD_LIBRARY_PATH=/usr/local/lib ./target/release/cowt doctor || true
       - uses: actions/upload-artifact@v4
         with:
           name: cowt-${{ matrix.os }}

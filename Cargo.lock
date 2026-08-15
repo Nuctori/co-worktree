@@ -988,8 +988,6 @@ dependencies = [
 [[package]]
 name = "winfsp-sys"
 version = "0.12.1+winfsp-2.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d42acc30c105f8d33507f556398237c738b681271c775a3b94eefd29d2b8c77e"
 dependencies = [
  "bindgen",
 ]
