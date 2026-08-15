@@ -396,20 +396,10 @@ fn e2e_run_diff_apply() {
     );
     assert_eq!(kinds.get("cache.bin").map(String::as_str), Some("deleted"));
 
-    // Content diff: Myers line diff + JSON key diff.
-    let content = env.cowt_ok(&["diff", &id, "--content"]);
-    assert!(
-        contains(&content, "-line2") && contains(&content, "+line2 CHANGED"),
-        "line diff missing:\n{content}"
-    );
-    assert!(
-        contains(&content, "font: 12 -> 16"),
-        "key diff missing:\n{content}"
-    );
-
     // Whiteout encoding visible in the upper layer. Kernel overlayfs uses a
     // char dev 0:0 carrying the victim's own name; the other backends use the
-    // `.wh.` prefix. Both must be recognized.
+    // `.wh.` prefix. Both must be recognized. (Checked before the
+    // delete-then-recreate below, which clears the whiteout again.)
     let upper_files: Vec<String> = fs::read_dir(env.upper_of(&id))
         .unwrap()
         .flatten()
@@ -434,15 +424,46 @@ fn e2e_run_diff_apply() {
     };
     assert!(whiteout_found, "no whiteout in upper: {upper_files:?}");
 
+    // Delete-then-recreate through the view: the recreated file must be
+    // openable and visible again (a stale whiteout must not shadow it), and
+    // diff must show it as modified.
+    let mut sleeper = spawn_sleeper(&env, &id, 6);
+    fs::write(app.join("cache.bin"), "reborn\n").unwrap();
+    assert_eq!(
+        fs::read_to_string(app.join("cache.bin")).unwrap(),
+        "reborn\n"
+    );
+    wait_run(&mut sleeper);
+    let json = env.cowt_ok(&["diff", &id, "--json"]);
+    let kinds: HashMap<String, String> = parse_changes(&json).into_iter().collect();
+    assert_eq!(
+        kinds.get("cache.bin").map(String::as_str),
+        Some("modified"),
+        "recreated file must diff as modified: {kinds:?}"
+    );
+
+    // Content diff: Myers line diff + JSON key diff.
+    let content = env.cowt_ok(&["diff", &id, "--content"]);
+    assert!(
+        contains(&content, "-line2") && contains(&content, "+line2 CHANGED"),
+        "line diff missing:\n{content}"
+    );
+    assert!(
+        contains(&content, "font: 12 -> 16"),
+        "key diff missing:\n{content}"
+    );
+
+
     // Clean apply: base == current, worktree changed.
     env.cowt_ok(&["apply", &id]);
     assert_eq!(
         fs::read_to_string(app.join("settings.txt")).unwrap(),
         "line1\nline2 CHANGED\nline3\n"
     );
-    assert!(
-        !app.join("cache.bin").exists(),
-        "whiteout victim still present"
+    assert_eq!(
+        fs::read_to_string(app.join("cache.bin")).unwrap(),
+        "reborn\n",
+        "recreated file must survive apply"
     );
     assert_eq!(
         fs::read_to_string(app.join("logs/renamed.log")).unwrap(),

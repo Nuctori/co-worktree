@@ -233,14 +233,20 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 pub(crate) fn pid_alive(pid: u32) -> bool {
-    use windows::Win32::Foundation::CloseHandle;
+    use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER};
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) };
-    if let Ok(h) = handle {
-        let _ = unsafe { CloseHandle(h) };
-        true
-    } else {
-        false
+    match handle {
+        Ok(h) => {
+            let _ = unsafe { CloseHandle(h) };
+            true
+        }
+        Err(e) => {
+            // ERROR_ACCESS_DENIED: the process exists but is protected —
+            // treat as alive. ERROR_INVALID_PARAMETER: no such pid.
+            e.code() != ERROR_INVALID_PARAMETER.into()
+                && e.code() != windows::core::HRESULT(ERROR_ACCESS_DENIED.0 as i32)
+        }
     }
 }
 

@@ -117,7 +117,8 @@ impl CowFs {
     }
 
     /// Where the merged entry lives; upper wins. The empty path is the root,
-    /// served from the lower (host) dir.
+    /// served from the lower (host) dir. A whiteout in upper shadows the
+    /// lower entry entirely.
     fn resolve(&self, rel: &Path) -> Option<PathBuf> {
         if rel.as_os_str().is_empty() {
             return Some(self.lower.clone());
@@ -126,6 +127,24 @@ impl CowFs {
         if fs::symlink_metadata(&up).is_ok() {
             return Some(up);
         }
+        // Whiteout check: a `.wh.<name>` in upper means the lower entry was
+        // deleted in the worktree.
+        let (parent, name) = (
+            rel.parent().unwrap_or(Path::new("")),
+            rel.file_name()?,
+        );
+        if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
+            let needle = name.to_string_lossy().to_lowercase();
+            for e in rd.flatten() {
+                let n = e.file_name();
+                let n = n.to_string_lossy();
+                if let Some(victim) = n.strip_prefix(WHITEOUT_PREFIX) {
+                    if victim.to_lowercase() == needle {
+                        return None; // deleted in the worktree
+                    }
+                }
+            }
+        }
         let low = self.lower_of(rel);
         if fs::symlink_metadata(&low).is_ok() {
             return Some(low);
@@ -133,13 +152,17 @@ impl CowFs {
         None
     }
 
-    /// Merged directory entries: upper wins; whiteouts are excluded.
+    /// Merged directory entries: upper wins; whiteouts and the lower entries
+    /// they shadow are excluded.
     fn merged_dir_entries(&self, rel: &Path) -> Vec<std::ffi::OsString> {
         let mut names: Vec<std::ffi::OsString> = Vec::new();
+        let mut whiteouts: Vec<std::ffi::OsString> = Vec::new();
         if let Ok(rd) = fs::read_dir(self.upper_of(rel)) {
             for e in rd.flatten() {
                 let name = e.file_name();
-                if name.to_string_lossy().starts_with(WHITEOUT_PREFIX) {
+                let s = name.to_string_lossy();
+                if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
+                    whiteouts.push(std::ffi::OsString::from(victim));
                     continue;
                 }
                 names.push(name);
@@ -149,7 +172,10 @@ impl CowFs {
             for e in rd.flatten() {
                 let name = e.file_name();
                 if names.iter().any(|n| *n == name) {
-                    continue;
+                    continue; // shadowed by an upper entry
+                }
+                if whiteouts.iter().any(|w| *w == name) {
+                    continue; // shadowed by a whiteout
                 }
                 names.push(name);
             }
@@ -347,21 +373,34 @@ impl Filesystem for CowFs {
         _umask: u32,
         reply: ReplyEntry,
     ) {
-        let Some(rel) = self
-            .inos
-            .lock()
-            .unwrap()
-            .path_of(parent)
-            .map(|p| p.join(name))
         else {
             return reply.error(libc::ENOENT);
         };
+        self.clear_whiteout(&rel);
         if let Err(e) = fs::create_dir_all(self.upper_of(&rel)) {
             return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
         }
         match self.attr_of(&rel) {
             Ok(attr) => reply.entry(&ttl(), &attr, 0),
             Err(_) => reply.error(libc::EIO),
+        }
+    }
+
+    /// Remove the whiteout for `rel`, if any (case-insensitively).
+    fn clear_whiteout(&self, rel: &Path) {
+        let (parent, name) = (rel.parent().unwrap_or(Path::new("")), rel.file_name());
+        let Some(name) = name else { return };
+        let needle = name.to_string_lossy().to_lowercase();
+        if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
+            for e in rd.flatten() {
+                let n = e.file_name();
+                let s = n.to_string_lossy();
+                if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
+                    if victim.to_lowercase() == needle {
+                        let _ = fs::remove_file(e.path());
+                    }
+                }
+            }
         }
     }
 
@@ -648,6 +687,7 @@ impl Filesystem for CowFs {
         else {
             return reply.error(libc::ENOENT);
         };
+        self.clear_whiteout(&rel);
         let dst = self.upper_of(&rel);
         if let Some(p) = dst.parent() {
             if let Err(e) = fs::create_dir_all(p) {

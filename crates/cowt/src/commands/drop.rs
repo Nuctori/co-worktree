@@ -29,14 +29,23 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
         }
         eprintln!("cowt: --force: terminating pid {pid}");
         terminate(pid);
-        State::clear_running(&dir);
+        // Note: run.pid is cleared *after* the unmount loop below — the
+        // stale_run() discriminator needs it to prove the mount is ours.
     }
 
     // 2. A stale mount must come down before deleting state. Note the owning
     // `cowt run` may be unmounting concurrently after its child died, so the
     // outcome is decided by the final state, not by a single unmount call.
+    // Only mounts proven to be our own leftover (stale pidfile) are torn
+    // down — a foreign mount on the target is never unmounted, even with
+    // --force (D-005 boundary).
+    let mut foreign_mount = false;
     for _ in 0..30 {
         if !backend.is_mounted(&meta.target) {
+            break;
+        }
+        if !State::stale_run(&dir) {
+            foreign_mount = true;
             break;
         }
         if !args.force {
@@ -49,8 +58,11 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
         let _ = backend.unmount(&meta.target); // tolerate races; verify below
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
-    if backend.is_mounted(&meta.target) {
-        bail!("could not unmount {}; drop aborted", meta.target.display());
+    if foreign_mount || backend.is_mounted(&meta.target) {
+        bail!(
+            "{} is mounted by something else (not a cowt leftover); refusing to unmount it",
+            meta.target.display()
+        );
     }
 
     // 3. Atomic-ish removal: rename aside first so the worktree id vanishes
@@ -109,8 +121,17 @@ fn terminate(pid: u32) {
 
 #[cfg(windows)]
 fn terminate(pid: u32) {
+    use crate::state::pid_alive;
     use std::process::Command;
     let _ = Command::new("taskkill")
         .args(["/F", "/PID", &pid.to_string()])
         .status();
+    // taskkill returns before the process is fully gone; stale_run() needs
+    // it dead, so wait for the exit.
+    for _ in 0..50 {
+        if !pid_alive(pid) {
+            return;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
 }

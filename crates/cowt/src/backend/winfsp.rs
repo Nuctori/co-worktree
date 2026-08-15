@@ -58,7 +58,11 @@ pub struct WinFspBackend;
 /// handle (with its relative path, so delete-on-cleanup works even when the
 /// kernel does not pass a name), or a directory path (re-listed on demand).
 pub enum Handle {
-    File { f: std::fs::File, rel: PathBuf },
+    File {
+        f: std::fs::File,
+        rel: PathBuf,
+        writable: bool,
+    },
     Dir(PathBuf),
 }
 
@@ -396,12 +400,17 @@ impl CowFs {
 
     /// Where the merged entry lives; upper wins. The empty path is the
     /// volume root, served from the lower (host) dir. A whiteout in upper
-    /// shadows the lower entry entirely.
+    /// shadows the lower entry — but an *upper* entry wins over its own
+    /// whiteout (delete-then-recreate must reopen the new file).
     fn resolve(&self, rel: &Path) -> Option<PathBuf> {
         if rel.as_os_str().is_empty() {
             return Some(self.lower.clone());
         }
         let (parent, name) = (rel.parent().unwrap_or(Path::new("")), rel.file_name()?);
+        let up = self.upper_of(rel);
+        if fs::symlink_metadata(&up).is_ok() {
+            return Some(up);
+        }
         // Whiteout check (case-insensitive: WinFsp may pass an uppercase name).
         if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
             let needle = name.to_string_lossy().to_lowercase();
@@ -414,10 +423,6 @@ impl CowFs {
                     }
                 }
             }
-        }
-        let up = self.upper_of(rel);
-        if fs::symlink_metadata(&up).is_ok() {
-            return Some(up);
         }
         let low = self.lower_of(rel);
         if fs::symlink_metadata(&low).is_ok() {
@@ -545,6 +550,23 @@ impl CowFs {
         Ok(())
     }
 
+    /// Remove the whiteout for `rel`, if any (case-insensitively).
+    fn clear_whiteout(&self, rel: &Path) {
+        let (parent, name) = (rel.parent().unwrap_or(Path::new("")), rel.file_name());
+        let Some(name) = name else { return };
+        let needle = name.to_string_lossy().to_lowercase();
+        if let Ok(rd) = fs::read_dir(self.upper_of(parent)) {
+            for e in rd.flatten() {
+                let n = e.file_name();
+                let s = n.to_string_lossy();
+                if let Some(victim) = s.strip_prefix(WHITEOUT_PREFIX) {
+                    if victim.to_lowercase() == needle {
+                        let _ = fs::remove_file(e.path());
+                    }
+                }
+            }
+        }
+    }
     fn fill_file_info(meta: &fs::Metadata, attrs: u32, info: &mut FileInfo) {
         info.file_attributes = attrs;
         info.allocation_size = meta.len();
@@ -641,6 +663,7 @@ impl FileSystemContext for CowFs {
         Ok(Handle::File {
             f,
             rel: rel.clone(),
+            writable: wants_write,
         })
     }
 
@@ -662,6 +685,9 @@ impl FileSystemContext for CowFs {
     ) -> FspResult<Self::FileContext> {
         let rel = rel_of(file_name);
         let dst = self.upper_of(&rel);
+        // A leftover whiteout (delete-then-recreate) must not shadow the
+        // freshly created entry.
+        self.clear_whiteout(&rel);
         if file_attributes & FILE_ATTRIBUTE_DIRECTORY != 0 || create_options & 0x1 != 0
         /* FILE_DIRECTORY_FILE */
         {
@@ -687,6 +713,7 @@ impl FileSystemContext for CowFs {
         Ok(Handle::File {
             f,
             rel: rel.clone(),
+            writable: true,
         })
     }
 
@@ -714,8 +741,12 @@ impl FileSystemContext for CowFs {
         context: Option<&Self::FileContext>,
         _file_info: &mut FileInfo,
     ) -> FspResult<()> {
-        if let Some(Handle::File { f, .. }) = context {
-            f.sync_all()?;
+        if let Some(Handle::File { f, writable, .. }) = context {
+            if *writable {
+                // FlushFileBuffers on a read-only handle fails with
+                // ACCESS_DENIED; only fsync write-opened handles.
+                f.sync_all()?;
+            }
         }
         Ok(())
     }
