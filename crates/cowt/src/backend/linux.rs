@@ -250,7 +250,8 @@ impl FuseOverlayfs {
         mountpoint: &Path,
         cmd: &[String],
         pidfile: &Path,
-    ) -> Result<i32> {
+    ) -> Result<(i32, String)> {
+        self.available()?;
         self.available()?;
         let mut guard = self
             .mount(lower, upper, work, mountpoint)
@@ -279,7 +280,7 @@ impl FuseOverlayfs {
             Err(e) => eprintln!("cowt: warning: unmount failed: {e:#}"),
         }
         let status = result.context("wait for child process")?;
-        Ok(status.code().unwrap_or(1))
+        Ok(super::exit_code_and_desc(&status))
     }
 }
 
@@ -381,7 +382,7 @@ impl Backend for FuseOverlayfs {
         mountpoint: &Path,
         cmd: &[String],
         pidfile: &Path,
-    ) -> Result<i32> {
+    ) -> Result<(i32, String)> {
         match detect_mode() {
             Mode::KernelDirect => {
                 self.run_kernel_direct(lower, upper, work, mountpoint, cmd, pidfile)
