@@ -682,18 +682,15 @@ impl Filesystem for CowFs {
 // ------------------------------------------------------------ backend glue ==
 
 /// Probe: mount a throwaway filesystem, then tear it down.
-fn probe() -> bool {
+fn probe() -> anyhow::Result<()> {
     let probe = std::env::temp_dir().join(format!("cowt-fuse-probe-{}", std::process::id()));
     let (lower, upper, mountpoint) = (probe.join("l"), probe.join("u"), probe.join("m"));
-    let dirs_ok = [&lower, &upper, &mountpoint]
-        .iter()
-        .all(|d| std::fs::create_dir_all(d).is_ok());
-    if !dirs_ok {
-        return false;
+    for d in [&lower, &upper, &mountpoint] {
+        fs::create_dir_all(d).with_context(|| format!("create probe dir {}", d.display()))?;
     }
-    let ok = mount_cow(&lower, &upper, &mountpoint, "cowt-probe").is_ok();
-    let _ = std::fs::remove_dir_all(&probe);
-    ok
+    let result = mount_cow(&lower, &upper, &mountpoint, "cowt-probe");
+    let _ = fs::remove_dir_all(&probe);
+    result.map(|_| ())
 }
 
 /// Mount the CoW filesystem at `mountpoint` and return a background session.
@@ -747,15 +744,13 @@ impl Backend for FuseT {
     }
 
     fn available(&self) -> Result<()> {
-        if probe() {
-            Ok(())
-        } else {
-            bail!(
-                "FUSE-T is not usable: install it with \
-                 `brew install macos-fuse-t/homebrew-cask/fuse-t` (see \
-                 scripts/macos/install-fuse-t.sh); mounting needs root"
+        probe().map_err(|e| {
+            anyhow::anyhow!(
+                "FUSE-T is not usable: {e:#} \
+                 (install it with `brew install macos-fuse-t/homebrew-cask/fuse-t`; \
+                 see scripts/macos/install-fuse-t.sh)"
             )
-        }
+        })
     }
 
     fn mount(
