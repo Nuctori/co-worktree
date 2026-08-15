@@ -227,10 +227,14 @@ impl FuseOverlayfs {
             .env("COWT_MNT", mountpoint)
             .spawn()
             .context("spawn unshare wrapper")?;
-        super::write_pidfile(pidfile, child.id()).inspect_err(|e| {
-            super::reap_orphan_child(&mut child);
-            eprintln!("cowt: pidfile race lost: {e}");
-        })?;
+        match super::write_pidfile(pidfile, child.id()) {
+            Ok(()) => {}
+            Err(e) => {
+                super::reap_orphan_child(&mut child);
+                eprintln!("cowt: pidfile race lost: {e}");
+                return Err(anyhow::anyhow!("{e}"));
+            }
+        }
         let status = child.wait().context("wait for isolated process")?;
         Ok(status.code().unwrap_or(1))
     }
@@ -257,10 +261,14 @@ impl FuseOverlayfs {
             .args(&cmd[1..])
             .spawn()
             .with_context(|| format!("spawn '{}'", cmd[0]))?;
-        super::write_pidfile(pidfile, child.id()).inspect_err(|e| {
-            super::reap_orphan_child(&mut child);
-            eprintln!("cowt: pidfile race lost: {e}");
-        })?;
+        match super::write_pidfile(pidfile, child.id()) {
+            Ok(()) => {}
+            Err(e) => {
+                super::reap_orphan_child(&mut child);
+                eprintln!("cowt: pidfile race lost: {e}");
+                return Err(anyhow::anyhow!("{e}"));
+            }
+        }
         let result = child.wait();
         // Always unmount, whatever the child did (including crashes).
         match self.unmount(mountpoint) {

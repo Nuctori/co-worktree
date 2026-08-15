@@ -71,10 +71,14 @@ pub trait Backend: Send + Sync {
                 return Err(anyhow::anyhow!("spawn '{}': {e}", cmd[0]));
             }
         };
-        write_pidfile(pidfile, child.id()).inspect_err(|e| {
-            reap_orphan_child(&mut child);
-            eprintln!("cowt: pidfile race lost: {e}");
-        })?;
+        match write_pidfile(pidfile, child.id()) {
+            Ok(()) => {}
+            Err(e) => {
+                reap_orphan_child(&mut child);
+                eprintln!("cowt: pidfile race lost: {e}");
+                return Err(anyhow::anyhow!("{e}"));
+            }
+        }
         let result = child.wait();
         // Kernel overlayfs renames a lower directory lazily: upper/ holds the
         // renamed dir but its children stay un-materialized (resolved through
