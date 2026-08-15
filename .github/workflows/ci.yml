@@ -47,7 +47,11 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs
       - name: "Install WinFsp (Windows: FUSE-backed integration tests)"
         if: runner.os == 'Windows'
-        run: choco install winfsp -y
+        run: |
+          # winget first: chocolatey.org has been flaky (HTTP 499 from
+          # Cloudflare) on runner images.
+          winget install -e --id WinFsp.WinFsp --accept-source-agreements --accept-package-agreements --silent --disable-interactivity 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) { choco install winfsp -y }
       # fuser's build.rs probes pkg-config 'fuse' on macOS; without FUSE-T
       # the crate does not compile at all, so install it before building.
       - name: Install FUSE-T (macOS build dependency)
@@ -81,7 +85,9 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y fuse-overlayfs
       - name: Install WinFsp (Windows)
         if: runner.os == 'Windows'
-        run: choco install winfsp -y
+        run: |
+          winget install -e --id WinFsp.WinFsp --accept-source-agreements --accept-package-agreements --silent --disable-interactivity 2>&1 | Out-Host
+          if ($LASTEXITCODE -ne 0) { choco install winfsp -y }
       - name: Install FUSE-T (macOS)
         if: runner.os == 'macOS'
         run: bash scripts/macos/install-fuse-t.sh
