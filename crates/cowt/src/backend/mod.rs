@@ -71,8 +71,9 @@ pub trait Backend: Send + Sync {
                 return Err(anyhow::anyhow!("spawn '{}': {e}", cmd[0]));
             }
         };
-        write_pidfile(pidfile, child.id()).inspect_err(|_e| {
+        write_pidfile(pidfile, child.id()).inspect_err(|e| {
             reap_orphan_child(&mut child);
+            eprintln!("cowt: pidfile race lost: {e}");
         })?;
         let result = child.wait();
         // Kernel overlayfs renames a lower directory lazily: upper/ holds the
