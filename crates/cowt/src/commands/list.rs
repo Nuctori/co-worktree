@@ -15,7 +15,10 @@ pub fn list(json_out: bool) -> Result<()> {
         return Ok(());
     }
     if metas.is_empty() {
-        println!("no worktrees (state root: {})", state.root().display());
+        println!(
+            "no worktrees (state root: {})",
+            crate::state::sanitize_display(&state.root().display().to_string())
+        );
         return Ok(());
     }
     println!(
@@ -60,14 +63,20 @@ pub fn status(id: &str, json_out: bool) -> Result<()> {
         if let Some(n) = &meta.name {
             println!("name:      {}", crate::state::sanitize_display(n));
         }
-        println!("target:    {}", meta.target.display());
+        println!(
+            "target:    {}",
+            crate::state::sanitize_display(&meta.target.display().to_string())
+        );
         println!("status:    {}", effective_status(&state, &meta));
         println!("backend:   {}", meta.backend);
         if let Some(pid) = running {
             println!("running:   pid {pid}");
         }
         println!("upper:     {} bytes of isolated data", upper_size);
-        println!("state:     {}", dir.display());
+        println!(
+            "state:     {}",
+            crate::state::sanitize_display(&dir.display().to_string())
+        );
     }
     Ok(())
 }
@@ -80,7 +89,10 @@ pub fn doctor() -> Result<()> {
         Ok(()) => println!("available: yes"),
         Err(e) => println!("available: NO ({e:#})"),
     }
-    println!("state:     {}", State::open()?.root().display());
+    println!(
+        "state:     {}",
+        crate::state::sanitize_display(&State::open()?.root().display().to_string())
+    );
     Ok(())
 }
 

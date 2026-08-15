@@ -153,7 +153,7 @@ fn print_plan(plan: &merge::MergePlan) {
         println!(
             "  CONFLICT [{}] {} (base={}, current={}, worktree={})",
             serde_json::to_string(&c.kind).unwrap().trim_matches('"'),
-            c.path.display(),
+            crate::state::sanitize_display(&c.path.display().to_string()),
             c.base_hash.as_deref().unwrap_or("-"),
             c.current_hash.as_deref().unwrap_or("-"),
             c.work_hash.as_deref().unwrap_or("-"),
@@ -162,7 +162,7 @@ fn print_plan(plan: &merge::MergePlan) {
     for k in &plan.kept {
         println!(
             "  keep   {} (host changed, worktree untouched)",
-            k.display()
+            crate::state::sanitize_display(&k.display().to_string())
         );
     }
 }

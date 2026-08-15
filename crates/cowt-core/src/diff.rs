@@ -190,9 +190,15 @@ fn is_text(s: &str) -> bool {
 }
 
 /// Unified line diff using the Myers algorithm.
+///
+/// A deadline bounds the worst case: Myers is O(N×M) and two large,
+/// completely distinct files (a rewritten log, a regenerated dump) would
+/// otherwise spin for minutes-hours. similar degrades to a delete+add
+/// approximation past the deadline.
 pub fn unified_diff(old: &str, new: &str) -> String {
     TextDiff::configure()
         .algorithm(Algorithm::Myers)
+        .deadline(std::time::Instant::now() + std::time::Duration::from_secs(5))
         .diff_lines(old, new)
         .unified_diff()
         .context_radius(3)
