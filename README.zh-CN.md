@@ -112,6 +112,9 @@ CI 基线：**12/12 全绿** —— rustfmt、clippy `-D warnings`、三平台�
 - **符号链接不隔离**：fork 目录内的链接会被合并视图跟随——通过它写入直接落到宿主
   目标，且 `cowt diff` 不可见；fork 检测到 symlink 时会打印警告（Windows/macOS
   后端经 copy-up 将写入包含进隔离层，但不保留链接语义）
+- **apply 以冲突为门禁，非事务性**：单文件 rename 原子，但多文件 apply 中途中断
+  （崩溃/断电）会留下已写入的文件——每个文件各自一致，无半截文件体；worktree
+  运行中 apply 会被拒绝（规划前后各检查一次）
 - **Windows 同卷限制**：状态目录（`COWT_HOME`，默认 `%LOCALAPPDATA%\cowt`）必须与
   目标目录同卷（Windows 不能跨卷 rename）；`cowt run` 会给出明确报错
 

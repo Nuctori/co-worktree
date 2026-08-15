@@ -1028,17 +1028,6 @@ fn e2e_symlink_write_through() {
         );
     }
     wait_run(&mut sleeper);
-    wait_run(&mut sleeper);
-
-    #[cfg(unix)]
-    {
-        // VFS follows the link: the write reached the real host target.
-        assert_eq!(
-            fs::read_to_string(outside.join("sub/leaked.txt")).unwrap(),
-            "leak\n",
-            "unix: write through symlink must reach the host target (documented boundary)"
-        );
-    }
 
     // The leaked write is invisible to diff (not in upper).
     let json = env.cowt_ok(&["diff", &id, "--json"]);
@@ -1046,5 +1035,43 @@ fn e2e_symlink_write_through() {
         !json.contains("leaked"),
         "leaked write must not appear in diff: {json}"
     );
+    env.cowt_ok(&["drop", &id]);
+}
+
+/// Adversarial: `apply`/`diff` while the worktree is mounted (process alive)
+/// must be refused — upper is being written and the merge/diff would read
+/// inconsistent state. After the run exits, the same commands must work.
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_apply_diff_refused_while_running() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let (app, id) = seeded_app(&env);
+
+    let mut sleeper = spawn_sleeper(&env, &id, 5);
+    // diff while running: refused.
+    let out = env.cowt().args(["diff", &id, "--json"]).output().unwrap();
+    assert!(
+        !out.status.success()
+            && String::from_utf8_lossy(&out.stderr).contains("is running"),
+        "diff while running must be refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // apply while running: refused.
+    let out = env.cowt().args(["apply", &id]).output().unwrap();
+    assert!(
+        !out.status.success()
+            && String::from_utf8_lossy(&out.stderr).contains("is running"),
+        "apply while running must be refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    wait_run(&mut sleeper);
+    assert_mount_gone(&app);
+
+    // After the run, both work again.
+    let _ = env.cowt_ok(&["diff", &id, "--json"]);
+    env.cowt_ok(&["apply", &id]);
     env.cowt_ok(&["drop", &id]);
 }

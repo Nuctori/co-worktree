@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use cowt_core::{merge, overlay, Manifest};
 
 use crate::backend::{default_backend, recover_stale_mount};
-use crate::state::{State, Status};
+use crate::state::State;
 
 pub struct ApplyArgs {
     pub id: String,
@@ -77,9 +77,24 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
         return Ok(3);
     }
 
+    // TOCTOU guard: re-verify the gates right before the write phase — a run
+    // may have started while we were planning (the check above is not
+    // atomic). A live mount or fresh pidfile means upper is being written.
+    if State::running_pid(&dir).is_some() {
+        bail!(
+            "worktree '{}' started running during planning; apply aborted (nothing written)",
+            meta.id
+        );
+    }
+    if default_backend().is_mounted(&meta.target) {
+        bail!(
+            "{} is mounted again; apply aborted (nothing written)",
+            meta.target.display()
+        );
+    }
+
     let report = merge::execute(&plan, &meta.target)?;
-    let mut meta = meta;
-    meta.status = Status::Applied;
+    let meta = meta;
     State::write_meta(&dir, &meta)?;
 
     if args.json {

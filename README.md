@@ -127,6 +127,11 @@ Windows cross-compile check, release builds for all three.
   directly and are invisible to `cowt diff`. `fork` prints a warning when
   it detects symlinks. (Windows/macOS backends contain the write via
   copy-up, but link semantics are not preserved.)
+- **`apply` is conflict-gated, not transactional**: per-file renames are
+  atomic, but a multi-file apply interrupted mid-way (crash, power loss)
+  leaves the already-written files in place — each file is individually
+  consistent, no partial file bodies. Apply refuses while the worktree is
+  running (checked both before and after planning).
 - **Windows same-volume limit**: the state dir (`COWT_HOME`, default
   `%LOCALAPPDATA%\cowt`) must be on the same volume as the target (Windows
   cannot rename across volumes); `cowt run` reports a clear error otherwise

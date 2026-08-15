@@ -14,7 +14,10 @@
 //!
 //! Application is atomic: every file body is first staged in a hidden sibling
 //! directory of the target, then `rename(2)`-ed into place. If any conflict
-//! exists, nothing is written at all.
+//! exists, nothing is written at all. Note: per-file renames are atomic, but
+//! the multi-file commit is not transactional — a failure mid-way leaves the
+//! already-renamed files in place (each file individually consistent); the
+//! staging phase still guarantees zero *partial* files on the host.
 
 use std::collections::BTreeSet;
 use std::fs;
