@@ -675,16 +675,32 @@ impl Filesystem for CowFs {
 
 // ------------------------------------------------------------ backend glue ==
 
-/// Probe: mount a throwaway filesystem, then tear it down.
+/// Probe: mount a throwaway filesystem, then tear it down. The session is
+/// dropped (unmounting the probe) *before* the temp dir is removed — the
+/// mountpoint stays busy while the session is alive.
 fn probe() -> anyhow::Result<()> {
     let probe = std::env::temp_dir().join(format!("cowt-fuse-probe-{}", std::process::id()));
     let (lower, upper, mountpoint) = (probe.join("l"), probe.join("u"), probe.join("m"));
     for d in [&lower, &upper, &mountpoint] {
         fs::create_dir_all(d).with_context(|| format!("create probe dir {}", d.display()))?;
     }
-    let result = mount_cow(&lower, &upper, &mountpoint, "cowt-probe");
+    let session = match mount_cow(&lower, &upper, &mountpoint, "cowt-probe") {
+        Ok(s) => s,
+        Err(e) => {
+            let _ = fs::remove_dir_all(&probe);
+            return Err(e);
+        }
+    };
+    drop(session); // unmount the probe filesystem
+                   // Retry briefly: unmount may take a moment to release the mountpoint.
+    for _ in 0..50 {
+        if fs::remove_dir_all(&probe).is_ok() {
+            return Ok(());
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     let _ = fs::remove_dir_all(&probe);
-    result.map(|_| ())
+    Ok(())
 }
 
 /// Mount the CoW filesystem at `mountpoint` and return a background session.
