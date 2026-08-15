@@ -245,8 +245,45 @@ impl State {
     /// process is gone — i.e. the run crashed or was killed. This is the
     /// discriminator that makes stale-mount cleanup safe: the mount at the
     /// target (if any) can only be our own leftover.
+    ///
+    /// An EMPTY or unparseable pidfile (kill -9 between create and write)
+    /// is NOT considered ours: tearing down a mount on that evidence could
+    /// unmount a foreign filesystem (round-28). Only a well-formed pidfile
+    /// whose pid is verifiably dead is a provable cowt leftover.
     pub fn stale_run(dir: &Path) -> bool {
-        dir.join("run.pid").is_file() && Self::running_pid(dir).is_none()
+        let s = match fs::read_to_string(dir.join("run.pid")) {
+            Ok(s) => s,
+            Err(_) => return false,
+        };
+        let t = s.trim();
+        let pid = match t.split_once(':') {
+            Some((p, _)) => p.parse::<u32>().ok(),
+            None => t.parse::<u32>().ok(),
+        };
+        match pid {
+            Some(p) => !pid_alive(p),
+            None => false, // empty/garbage: ownership unknown, refuse
+        }
+    }
+
+    /// Remove the pidfile, but ONLY if it still records `expected_pid` —
+    /// a concurrently started run may have replaced it with its own pid,
+    /// and deleting that would leave the successor unowned (round-28).
+    #[allow(dead_code)] // used by tests; run.rs uses the running_pid guard
+    pub fn clear_running_if_owned(dir: &Path, expected_pid: u32) {
+        let owned = fs::read_to_string(dir.join("run.pid"))
+            .ok()
+            .map(|s| {
+                s.trim()
+                    .split(':')
+                    .next()
+                    .and_then(|p| p.parse::<u32>().ok())
+                    == Some(expected_pid)
+            })
+            .unwrap_or(false);
+        if owned {
+            let _ = fs::remove_file(dir.join("run.pid"));
+        }
     }
 
     pub fn clear_running(dir: &Path) {
@@ -283,9 +320,18 @@ pub fn valid_id_or_name(s: &str) -> bool {
 
 /// Atomic file write: temp file + rename (same filesystem). A kill -9
 /// mid-write leaves the old file intact instead of a truncated JSON that
-/// would brick the worktree (drop included).
+/// would brick the worktree (drop included). The tmp name is
+/// process-unique so two concurrent writers never truncate each other's
+/// temp file (round-28).
 fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
-    let tmp = path.with_extension("json.tmp");
+    let tmp = path.with_extension(format!(
+        "json.tmp-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    ));
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
 }
@@ -458,5 +504,43 @@ mod tests {
             "config-Code"
         );
         assert_eq!(default_name(Path::new("/")), "worktree");
+    }
+
+    /// Round-28: an empty or unparseable pidfile is NOT a provable cowt
+    /// leftover — stale_run must refuse it (a crash between create and
+    /// write must never authorize unmounting a possibly-foreign mount).
+    #[test]
+    fn stale_run_refuses_unparseable_pidfile() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Empty file (kill -9 between create_new and write_all).
+        fs::write(tmp.path().join("run.pid"), b"").unwrap();
+        assert!(
+            !State::stale_run(tmp.path()),
+            "empty pidfile must not be treated as our stale run"
+        );
+        // Garbage content.
+        fs::write(tmp.path().join("run.pid"), b"not-a-pid\n").unwrap();
+        assert!(!State::stale_run(tmp.path()));
+        // A well-formed pidfile with a dead pid IS stale.
+        fs::write(tmp.path().join("run.pid"), b"999999999\n").unwrap();
+        assert!(State::stale_run(tmp.path()));
+    }
+
+    /// Round-28: clear_running_if_owned must not delete a pidfile that a
+    /// successor run replaced with its own pid.
+    #[test]
+    fn clear_running_if_owned_respects_ownership() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Our pidfile records a live pid (our own process).
+        fs::write(tmp.path().join("run.pid"), std::process::id().to_string()).unwrap();
+        // A successor replaced it with a different live pid (simulated).
+        State::clear_running_if_owned(tmp.path(), 12345);
+        assert!(
+            tmp.path().join("run.pid").exists(),
+            "foreign pidfile must survive clear_running_if_owned"
+        );
+        // Ours matches -> removed.
+        State::clear_running_if_owned(tmp.path(), std::process::id());
+        assert!(!tmp.path().join("run.pid").exists());
     }
 }

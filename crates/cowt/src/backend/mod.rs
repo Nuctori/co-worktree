@@ -3,6 +3,7 @@
 //! The core engine is platform independent; only mounting the virtual merged
 //! view is platform specific. Each supported platform ships one backend.
 
+use std::fs;
 use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -65,11 +66,14 @@ pub(crate) fn install_signal_forwarding() {
     extern "system" fn handler(_ctrl: u32) -> windows::core::BOOL {
         let pid = CHILD_PID.load(Ordering::Relaxed);
         if pid > 0 {
+            use windows::Win32::Foundation::CloseHandle;
             use windows::Win32::System::Threading::{
                 OpenProcess, TerminateProcess, PROCESS_TERMINATE,
             };
             if let Ok(h) = unsafe { OpenProcess(PROCESS_TERMINATE, false, pid as u32) } {
                 let _ = unsafe { TerminateProcess(h, 1) };
+                // Round-28: don't leak the process handle on every Ctrl-C.
+                let _ = unsafe { CloseHandle(h) };
             }
         }
         windows::core::BOOL(1) // handled: let the main thread reap and tear down
@@ -321,20 +325,48 @@ pub(crate) fn write_pidfile(path: &Path, pid: u32) -> std::io::Result<()> {
         Ok(mut f) => {
             use std::io::Write;
             f.write_all(body.as_bytes())?;
+            f.sync_all()?;
             Ok(())
         }
         Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = std::fs::read_to_string(path)
-                .ok()
-                .and_then(|s| s.trim().split(':').next()?.parse::<u32>().ok());
-            match existing {
-                Some(p) if crate::state::pid_alive(p) => Err(std::io::Error::new(
+            // The pidfile exists. Is it a LIVE run (ours or another) or a
+            // stale leftover from a crashed run? Same semantics as
+            // State::running_pid: pid alive AND (no starttime, or starttime
+            // matches) => live. Anything else (dead pid, recycled pid,
+            // unparseable/empty content) is stale and replaceable.
+            let s = fs::read_to_string(path).ok();
+            let live = s.as_deref().and_then(|s| {
+                let t = s.trim();
+                let (pid, expected) = match t.split_once(':') {
+                    Some((p, st)) => (p.parse::<u32>().ok()?, Some(st.parse::<u128>().ok()?)),
+                    None => (t.parse::<u32>().ok()?, None),
+                };
+                if !crate::state::pid_alive(pid) {
+                    return None;
+                }
+                if let Some(exp) = expected {
+                    if process_starttime(pid) != Some(exp) {
+                        return None; // recycled pid
+                    }
+                }
+                Some(pid)
+            });
+            match live {
+                Some(p) => Err(std::io::Error::new(
                     std::io::ErrorKind::AlreadyExists,
                     format!("another `cowt run` is in progress (pid {p})"),
                 )),
-                _ => {
-                    // Stale pidfile from a crashed run: replace it.
-                    std::fs::write(path, body)
+                None => {
+                    // Stale pidfile: replace atomically. remove-then-create
+                    // closes the read-judge-write race — two concurrent
+                    // runners both find it stale, but only one wins the
+                    // O_EXCL create after removal (round-28).
+                    match fs::remove_file(path) {
+                        Ok(()) => {}
+                        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+                        Err(e) => return Err(e),
+                    }
+                    write_pidfile(path, pid) // retry: creates fresh, O_EXCL
                 }
             }
         }
@@ -600,5 +632,45 @@ mod macos_ffi_tests {
         assert_eq!(size_of::<ProcShortBsdInfo>(), 104);
         assert_eq!(offset_of!(ProcShortBsdInfo, pbsi_start_tvsec), 88);
         assert_eq!(offset_of!(ProcShortBsdInfo, pbsi_start_tvusec), 96);
+    }
+}
+
+#[cfg(test)]
+mod pidfile_tests {
+    use super::write_pidfile;
+    use std::path::PathBuf;
+
+    /// Round-28: a pidfile whose pid is alive but whose starttime does not
+    /// match (recycled pid) is stale — write_pidfile must replace it, not
+    /// refuse with a fake "another run in progress" (R28-04).
+    #[test]
+    fn write_pidfile_replaces_recycled_starttime() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pf: PathBuf = tmp.path().join("run.pid");
+        // Our own live pid with a bogus starttime = recycled-pid residual.
+        std::fs::write(&pf, format!("{}:1", std::process::id())).unwrap();
+        write_pidfile(&pf, std::process::id()).unwrap();
+        let body = std::fs::read_to_string(&pf).unwrap();
+        assert!(
+            body.starts_with(&format!("{}:", std::process::id())),
+            "recycled pidfile must be replaced with our pid:starttime, got {body}"
+        );
+    }
+
+    /// Round-28: a pidfile with a LIVE pid (any starttime, e.g. plain
+    /// format) must be refused — never overwrite an active run's marker
+    /// (R28-01 keeps O_EXCL atomicity).
+    #[test]
+    fn write_pidfile_refuses_live_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pf: PathBuf = tmp.path().join("run.pid");
+        std::fs::write(&pf, std::process::id().to_string()).unwrap();
+        let err = write_pidfile(&pf, std::process::id()).unwrap_err();
+        assert_eq!(err.kind(), std::io::ErrorKind::AlreadyExists);
+        // The live marker is untouched.
+        assert_eq!(
+            std::fs::read_to_string(&pf).unwrap(),
+            std::process::id().to_string()
+        );
     }
 }

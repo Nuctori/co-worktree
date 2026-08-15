@@ -55,7 +55,14 @@ pub fn run(args: RunArgs) -> Result<i32> {
     // `drop --force` recognizes it as ours instead of a foreign mount
     // (round-26/round-23: R26-07 moved the clear after `code?`).
     if !default_backend().is_mounted(&meta.target) {
-        State::clear_running(&dir);
+        // Only remove the pidfile when no LIVE process is recorded: a
+        // successor `cowt run` may have replaced our pidfile during the
+        // teardown window, and deleting a live successor's marker would
+        // leave it unowned (round-28). Our own dead child's marker (or a
+        // recycled-pid mismatch) reads as not-running and is cleared.
+        if State::running_pid(&dir).is_none() {
+            State::clear_running(&dir);
+        }
     } else {
         eprintln!(
             "cowt: warning: {} is still mounted after the run; \

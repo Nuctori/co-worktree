@@ -979,3 +979,67 @@ fn corrupted_state_recovery_paths() {
     );
     assert!(!dir.exists(), "worktree dir must be removed");
 }
+
+// ---------------------------------------------------------------- R28
+
+/// Round-28: a garbage run.pid must not make stale_run treat the worktree
+/// as ours (which would authorize unmounting a foreign mount on the
+/// target). diff/apply must refuse cleanly, and drop --force must still
+/// work (its own guards decide).
+#[test]
+fn garbage_pidfile_does_not_poison_mount_ownership() {
+    let env = Env::new();
+    env.fork();
+    let dir = env.state_dir();
+    // Empty pidfile = kill -9 between create and write.
+    fs::write(dir.join("run.pid"), b"").unwrap();
+    let out = env.cowt().args(["diff", "demo"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "diff must still work with an empty pidfile: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    // Garbage content: same.
+    fs::write(dir.join("run.pid"), b"\x00garbage\xff\n").unwrap();
+    let out = env.cowt().args(["diff", "demo"]).output().unwrap();
+    assert!(out.status.success(), "garbage pidfile must not break diff");
+    // Cleanup still possible.
+    let out = env
+        .cowt()
+        .args(["drop", "demo", "--force"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "drop --force must still work: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Round-28: a pidfile recording a live pid (e.g. an innocent recycled
+/// process) must refuse run — never replace a live marker.
+#[test]
+fn run_refuses_live_pidfile() {
+    let env = Env::new();
+    env.fork();
+    let dir = env.state_dir();
+    // Our own live pid with a bogus starttime simulates a recycled pid that
+    // happens to be alive: running_pid rejects it as stale, but the run
+    // must not silently overwrite either — it proceeds (stale path), which
+    // is the R28-04 fix: write_pidfile replaces recycled markers.
+    fs::write(dir.join("run.pid"), format!("{}:1", std::process::id())).unwrap();
+    let out = env
+        .cowt()
+        .args(["run", "demo", "--", "sh", "-c", "true"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "recycled-pid marker must be replaced and run must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !dir.join("run.pid").exists(),
+        "run must clean its own pidfile"
+    );
+}

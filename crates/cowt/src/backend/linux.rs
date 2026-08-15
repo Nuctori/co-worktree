@@ -130,10 +130,20 @@ fn with_probe_dirs(f: impl Fn(&Path, &Path, &Path, &Path) -> bool) -> bool {
 /// Shell wrapper executed inside the user namespace: mount, then exec the
 /// user command (`"$@"`). The COWT_* variables are internal plumbing for
 /// the mount step; they must not leak into the child's environment (the
-/// lower dir is the host directory itself — round-26).
+/// lower dir is the host directory itself — round-26). The wrapper first
+/// waits for the pidfile to appear: the parent writes it immediately after
+/// spawn, so a kill in the spawn→pidfile window leaves the child waiting
+/// before it mounts anything (round-28) instead of holding an unrecorded
+/// mount.
 const WRAPPER: &str = r#"set -e
+i=0
+while [ ! -f "$COWT_PIDFILE" ]; do
+  i=$((i+1))
+  [ $i -ge 500 ] && exit 1
+  sleep 0.01
+done
 mount -t overlay overlay -o "lowerdir=$COWT_LOWER,upperdir=$COWT_UPPER,workdir=$COWT_WORK" "$COWT_MNT"
-unset COWT_LOWER COWT_UPPER COWT_WORK COWT_MNT
+unset COWT_LOWER COWT_UPPER COWT_WORK COWT_MNT COWT_PIDFILE
 exec "$@""#;
 
 impl FuseOverlayfs {
@@ -255,6 +265,7 @@ impl FuseOverlayfs {
             .env("COWT_UPPER", upper)
             .env("COWT_WORK", work)
             .env("COWT_MNT", mountpoint)
+            .env("COWT_PIDFILE", pidfile)
             .spawn()
             .context("spawn unshare wrapper")?;
         match super::write_pidfile(pidfile, child.id()) {

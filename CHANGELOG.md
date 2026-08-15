@@ -200,6 +200,31 @@ All notable changes to co-worktree are documented here.
 - Regression locks: symlink manifest round-trip (dangling/absolute/..-target)
   and whiteout-vs-symlink folding.
 
+### Added — round 28 (pidfile races / locking / concurrency)
+
+- `write_pidfile` stale replacement is now atomic (remove + retry O_EXCL) —
+  two concurrent `cowt run` can no longer both win the stale-replace race
+  and run against the same upper.
+- `write_pidfile` uses the same starttime-aware liveness check as
+  `running_pid`: a recycled-pid residual is replaced instead of causing a
+  permanent, falsely-reported "another run in progress" deadlock.
+- An empty or unparseable pidfile (kill -9 between create and write) is no
+  longer treated as our stale run — stale-mount cleanup refuses on that
+  evidence, so a foreign mount (rclone/sshfs) can never be torn down by a
+  crash residual.
+- `cowt run` only clears the pidfile when no live process is recorded — a
+  successor run's marker is never deleted during our teardown window.
+- userns mode: the wrapper now waits for the pidfile before mounting, so a
+  kill in the spawn→pidfile window leaves the child waiting instead of
+  holding an unrecorded mount (and `drop` no longer deletes state under a
+  live child).
+- `atomic_write` tmp names are process-unique (concurrent applies can no
+  longer truncate each other's temp file).
+- Windows Ctrl-C handler closes its process handle (no leak per Ctrl-C).
+- Regression locks: stale_run refuses unparseable pidfiles;
+  clear_running ownership; write_pidfile replaces recycled/rejects live
+  markers; cli-level garbage-pidfile and recycled-pid run tests.
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX
