@@ -1008,8 +1008,7 @@ fn dir_delete_with_host_only_file_conflicts() {
     assert!(plan
         .conflicts
         .iter()
-        .any(|c| c.path == PathBuf::from("d/extra.txt")
-            && c.kind == merge::ConflictKind::ModifyVsDelete));
+        .any(|c| c.path == *"d/extra.txt" && c.kind == merge::ConflictKind::ModifyVsDelete));
 }
 
 /// Round-24: a host edit landing between planning and execution must abort
