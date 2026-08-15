@@ -233,7 +233,7 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
 
 #[cfg(windows)]
 pub(crate) fn pid_alive(pid: u32) -> bool {
-    use windows::Win32::Foundation::{CloseHandle, ERROR_ACCESS_DENIED, ERROR_INVALID_PARAMETER};
+    use windows::Win32::Foundation::{CloseHandle, ERROR_INVALID_PARAMETER};
     use windows::Win32::System::Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION};
     let handle = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) };
     match handle {
@@ -242,10 +242,10 @@ pub(crate) fn pid_alive(pid: u32) -> bool {
             true
         }
         Err(e) => {
-            // ERROR_ACCESS_DENIED: the process exists but is protected —
-            // treat as alive. ERROR_INVALID_PARAMETER: no such pid.
+            // Only ERROR_INVALID_PARAMETER means "no such pid". Any other
+            // failure (e.g. ERROR_ACCESS_DENIED on a protected process)
+            // means the process exists — treat as alive.
             e.code() != ERROR_INVALID_PARAMETER.into()
-                && e.code() != windows::core::HRESULT::from_win32(ERROR_ACCESS_DENIED.0)
         }
     }
 }
@@ -268,5 +268,23 @@ pub fn default_name(target: &Path) -> String {
         "worktree".into()
     } else {
         slug
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn pid_alive_known_and_unknown() {
+        // Our own process is always alive; a pid that cannot exist is not.
+        assert!(pid_alive(std::process::id()));
+        assert!(!pid_alive(u32::MAX));
+    }
+
+    #[test]
+    fn default_name_slug() {
+        assert_eq!(default_name(Path::new("/home/u/.config/Code")), "config-Code");
+        assert_eq!(default_name(Path::new("/")), "worktree");
     }
 }
