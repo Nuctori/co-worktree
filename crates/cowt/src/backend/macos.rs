@@ -47,6 +47,21 @@ fn probe() -> bool {
     ok
 }
 
+/// Human-readable reason when the union probe fails.
+fn probe_reason() -> String {
+    // macOS 15+ ships no `/Library/Filesystems/union.fs` helper at all —
+    // `mount -t union` fails with exec ENOENT (verified on macos-latest).
+    let helper = Path::new("/Library/Filesystems/union.fs/Contents/Resources/mount_union");
+    if !helper.exists() {
+        return format!(
+            "this macOS no longer ships the union mount helper ({} is missing); \
+             cowt's macOS backend requires macOS 14 (Sonoma) or older",
+            helper.display()
+        );
+    }
+    "union mount failed (root required — run as root or via sudo)".into()
+}
+
 /// `mount -t union -o nobrowse <upper> <mountpoint>`: the mountpoint's own
 /// content becomes the lower layer (classic BSD union semantics).
 fn mount_union(upper: &Path, mountpoint: &Path) -> Result<()> {
@@ -75,10 +90,7 @@ impl Backend for Union {
         if available() {
             Ok(())
         } else {
-            bail!(
-                "kernel union mount unavailable (root required; run as root or \
-                 via sudo so `mount -t union` works)"
-            )
+            bail!("kernel union mount unavailable: {}", probe_reason())
         }
     }
 

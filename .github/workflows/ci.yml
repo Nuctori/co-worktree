@@ -61,8 +61,10 @@ jobs:
           - os: ubuntu-latest
             sudo: true
           # Root => macOS kernel union mount (`mount -t union`; no kexts,
-          # which is what makes macFUSE unusable on CI runners).
-          - os: macos-latest
+          # which is what makes macFUSE unusable on CI runners). macos-latest
+          # (Sequoia) removed the union.fs helper (mount_union exec fails
+          # ENOENT); macos-14 is the newest image where it still exists.
+          - os: macos-14
             sudo: true
           # Admin runner => WinFsp kernel driver via choco.
           - os: windows-latest
@@ -81,8 +83,10 @@ jobs:
         shell: bash
         run: |
           if [ "${{ matrix.sudo }}" = "true" ]; then
-            # sudo -E keeps RUSTUP_HOME/CARGO_HOME so no toolchain re-download.
-            sudo -E bash -c 'cargo test --test e2e -- --ignored --nocapture'
+            # sudo -E keeps RUSTUP_HOME/CARGO_HOME, but sudoers rewrites PATH:
+            # pass it through explicitly or `cargo` is not found.
+            sudo -E env "PATH=$PATH" bash -c \
+              'cargo test --test e2e -- --ignored --nocapture'
           else
             cargo test --test e2e -- --ignored --nocapture
           fi
@@ -102,10 +106,17 @@ jobs:
         with:
           targets: ${{ matrix.target }}
       - uses: Swatinem/rust-cache@v2
-      # winfsp-sys regenerates its bindings with bindgen at build time.
-      - name: Install libclang (bindgen)
-        run: sudo apt-get update && sudo apt-get install -y libclang-dev
-      - run: cargo check --workspace --all-targets --target ${{ matrix.target }}
+      # winfsp-sys regenerates its bindings with bindgen at build time; for
+      # the windows target, clang needs the mingw-w64 Windows SDK headers.
+      - name: Install libclang + mingw headers (bindgen)
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libclang-dev gcc-mingw-w64-x86-64
+      - name: Cross-compile check
+        env:
+          BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc: >-
+            -I/usr/x86_64-w64-mingw32/include
+        run: cargo check --workspace --all-targets --target ${{ matrix.target }}
 
   release-binary:
     name: release build (${{ matrix.os }})
@@ -121,7 +132,9 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       - run: cargo build --release
       - name: Smoke test the binary
-        run: ./target/release/cowt --version && ./target/release/cowt doctor || true
+        run: |
+          ./target/release/cowt --version
+          ./target/release/cowt doctor || true
       - uses: actions/upload-artifact@v4
         with:
           name: cowt-${{ matrix.os }}
