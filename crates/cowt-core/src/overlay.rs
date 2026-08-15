@@ -101,8 +101,10 @@ pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
         // subtree: `rm -rf x && ln -s t x` leaves only the symlink in upper,
         // and x/f.txt becomes unreachable in the merged view. Keep that
         // overlayfs semantics — otherwise diff misses the deletion and apply
-        // deadlocks on the non-empty dir (round-27).
-        if entry.kind != EntryKind::Dir {
+        // deadlocks on the non-empty dir (round-27). Only run the O(n) prune
+        // when a base entry below `rel` actually exists (a plain file update
+        // with no shadowed subtree stays O(1)).
+        if entry.kind != EntryKind::Dir && base_has_descendant(base, &rel) {
             let prefix = rel.clone();
             entries.retain(|p, _| !p.starts_with(&prefix));
         }
@@ -123,6 +125,13 @@ pub fn whiteout_victims(upper: &Path) -> Vec<PathBuf> {
     let mut opaque_dirs = Vec::new();
     collect_whiteouts(upper, upper, &mut deleted, &mut opaque_dirs);
     deleted
+}
+
+/// True if any base entry is `rel` itself or strictly below it — a
+/// dir-replacement must prune those; a plain file update has none and
+/// stays O(1).
+fn base_has_descendant(base: &Manifest, rel: &Path) -> bool {
+    base.entries.keys().any(|p| p.starts_with(rel))
 }
 
 /// Walk `dir` looking for overlayfs whiteouts.
