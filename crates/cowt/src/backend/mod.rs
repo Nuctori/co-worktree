@@ -113,7 +113,10 @@ pub(crate) fn exit_code_and_desc(status: &std::process::ExitStatus) -> (i32, Str
             return (128 + sig, format!("killed by signal {sig}"));
         }
     }
-    (status.code().unwrap_or(1), format!("exited with code {}", status.code().unwrap_or(1)))
+    (
+        status.code().unwrap_or(1),
+        format!("exited with code {}", status.code().unwrap_or(1)),
+    )
 }
 
 /// After a run, kernel overlayfs may have lazily copied up a renamed lower
