@@ -655,12 +655,18 @@ fn assert_mount_visible(target: &Path) {
 struct ForeignMount {
     target: PathBuf,
     kind: &'static str,
+    /// Windows: the real dir moved aside while the fake junction is in place.
+    #[cfg(windows)]
+    aside: Option<PathBuf>,
 }
 
 impl ForeignMount {
     /// Returns None when the platform cannot create a foreign mount here
     /// (e.g. unprivileged unix).
     fn create(env: &Env, target: &Path) -> Option<ForeignMount> {
+        // Only the Windows variant uses `env` (junction target dir).
+        #[cfg(not(windows))]
+        let _ = env;
         #[cfg(target_os = "linux")]
         {
             let status = Command::new("mount")
@@ -697,14 +703,23 @@ impl ForeignMount {
         }
         #[cfg(windows)]
         {
-            // A junction pointing anywhere but our `view` dir.
+            // A junction pointing anywhere but our `view` dir. The real dir
+            // is moved aside first (junctions cannot replace a directory).
             let elsewhere = env.tmp.path().join("elsewhere");
             fs::create_dir_all(&elsewhere).ok()?;
-            junction::create(target, &elsewhere).ok()?;
-            Some(ForeignMount {
-                target: target.to_path_buf(),
-                kind: "junction",
-            })
+            let aside = env.tmp.path().join("foreign-aside");
+            fs::rename(target, &aside).ok()?;
+            match junction::create(target, &elsewhere) {
+                Ok(()) => Some(ForeignMount {
+                    target: target.to_path_buf(),
+                    kind: "junction",
+                    aside: Some(aside),
+                }),
+                Err(_) => {
+                    let _ = fs::rename(&aside, target); // roll back the move
+                    None
+                }
+            }
         }
     }
 }
@@ -718,6 +733,9 @@ impl Drop for ForeignMount {
         #[cfg(windows)]
         {
             let _ = fs::remove_dir(&self.target);
+            if let Some(aside) = &self.aside {
+                let _ = fs::rename(aside, &self.target);
+            }
         }
         let _ = self.kind;
     }

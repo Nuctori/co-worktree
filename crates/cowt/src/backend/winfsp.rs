@@ -86,12 +86,22 @@ impl Backend for WinFspBackend {
     }
 
     fn available(&self) -> Result<()> {
-        winfsp::winfsp_init().map(|_| ()).map_err(|e| {
-            anyhow::anyhow!(
-                "WinFsp is not installed or its DLL failed to load: {e} \
-                 (install WinFsp from https://winfsp.dev or `choco install winfsp`)"
-            )
-        })
+        // The crate's winfsp_init only probes a DLL next to the binary; the
+        // `system` feature (registry lookup) would fix that but breaks Linux
+        // cross-compile builds, so the installer lookup is done here.
+        if winfsp::winfsp_init().is_ok() {
+            return Ok(());
+        }
+        if let Some(dll) = installed_winfsp_dll() {
+            load_library(&dll);
+            if winfsp::winfsp_init().is_ok() {
+                return Ok(());
+            }
+        }
+        bail!(
+            "WinFsp is not installed or its DLL failed to load \
+             (install WinFsp from https://winfsp.dev or `choco install winfsp`)"
+        )
     }
 
     fn mount(
@@ -254,6 +264,64 @@ fn restore(mountpoint: &Path, layout: &Layout) -> Result<()> {
 
 fn junction_exists(path: &Path) -> bool {
     fs::read_link(path).is_ok()
+}
+
+/// Locate the WinFsp installer DLL via the registry (`InstallDir` value,
+/// mirroring what the winfsp crate's `system` feature does — without the
+/// feature, so Linux cross-compile builds keep working).
+fn installed_winfsp_dll() -> Option<PathBuf> {
+    use std::os::windows::ffi::OsStringExt;
+    use windows::Win32::System::Registry::{RegGetValueW, HKEY_LOCAL_MACHINE, RRF_RT_REG_SZ};
+
+    let arch = if cfg!(target_arch = "x86_64") {
+        "winfsp-x64.dll"
+    } else if cfg!(target_arch = "x86") {
+        "winfsp-x86.dll"
+    } else {
+        "winfsp-a64.dll"
+    };
+
+    for subkey in [
+        windows::core::w!("SOFTWARE\\WOW6432Node\\WinFsp"),
+        windows::core::w!("SOFTWARE\\WinFsp"),
+    ] {
+        let mut buf = [0u16; 1024];
+        let mut size = (buf.len() * 2) as u32;
+        let status = unsafe {
+            RegGetValueW(
+                HKEY_LOCAL_MACHINE,
+                subkey,
+                windows::core::w!("InstallDir"),
+                RRF_RT_REG_SZ,
+                None,
+                Some(buf.as_mut_ptr().cast()),
+                Some(&mut size),
+            )
+        };
+        if status.is_err() {
+            continue;
+        }
+        let len = (size as usize) / 2;
+        let dir = PathBuf::from(std::ffi::OsString::from_wide(&buf[..len]));
+        let dll = dir.join("bin").join(arch);
+        if dll.is_file() {
+            return Some(dll);
+        }
+    }
+    None
+}
+
+/// Load a DLL into the process so the delay-load helper of `winfsp_init`
+/// finds it by name.
+fn load_library(path: &Path) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows::Win32::System::LibraryLoader::LoadLibraryW;
+    let wide: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    let _ = unsafe { LoadLibraryW(windows::core::PCWSTR(wide.as_ptr())) };
 }
 
 // ====================================================================== FS ==

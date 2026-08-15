@@ -181,7 +181,7 @@ fn hex(bytes: &[u8]) -> String {
 /// User home directory: `$HOME`, falling back to `%USERPROFILE%` on Windows
 /// (where `HOME` is commonly unset).
 pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME").map(PathBuf::from).or_else(|| {
+    std::env::var_os("HOME").map(PathBuf::from).or({
         #[cfg(windows)]
         {
             std::env::var_os("USERPROFILE").map(PathBuf::from)
