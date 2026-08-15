@@ -724,12 +724,18 @@ fn mount_cow(
             break;
         }
         if std::time::Instant::now() > deadline {
-            let mounts = std::process::Command::new("mount")
-                .output()
+            let out = std::process::Command::new("mount").output();
+            let mounts = out
+                .as_ref()
                 .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
                 .unwrap_or_default();
+            let err = out
+                .as_ref()
+                .map(|o| String::from_utf8_lossy(&o.stderr).into_owned())
+                .unwrap_or_default();
             bail!(
-                "FUSE-T mount at {} never became reachable; current mounts:\n{mounts}",
+                "FUSE-T mount at {} never became reachable; \
+                 mount stdout: [{mounts}] stderr: [{err}]",
                 mountpoint.display()
             );
         }
