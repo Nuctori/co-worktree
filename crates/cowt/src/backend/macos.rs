@@ -49,13 +49,15 @@ fn probe() -> bool {
 
 /// Human-readable reason when the union probe fails.
 fn probe_reason() -> String {
-    // macOS 15+ ships no `/Library/Filesystems/union.fs` helper at all —
-    // `mount -t union` fails with exec ENOENT (verified on macos-latest).
+    // Current macOS images (macos-14 GH runners and macOS 15+) ship no
+    // `/Library/Filesystems/union.fs` helper at all — `mount -t union` fails
+    // with exec ENOENT. The kernel union vfs is still present; cowt ships a
+    // replacement helper (see scripts/macos/install-union-helper.sh).
     let helper = Path::new("/Library/Filesystems/union.fs/Contents/Resources/mount_union");
     if !helper.exists() {
         return format!(
             "this macOS no longer ships the union mount helper ({} is missing); \
-             cowt's macOS backend requires macOS 14 (Sonoma) or older",
+             install cowt's replacement with: sudo bash scripts/macos/install-union-helper.sh",
             helper.display()
         );
     }

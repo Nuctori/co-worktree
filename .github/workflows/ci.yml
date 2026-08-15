@@ -79,6 +79,9 @@ jobs:
       - name: Install WinFsp (Windows)
         if: runner.os == 'Windows'
         run: choco install winfsp -y
+      - name: Install union mount helper (macOS)
+        if: runner.os == 'macOS'
+        run: sudo bash scripts/macos/install-union-helper.sh
       - name: Run E2E acceptance suite
         shell: bash
         run: |
@@ -108,12 +111,15 @@ jobs:
       - uses: Swatinem/rust-cache@v2
       # winfsp-sys regenerates its bindings with bindgen at build time; for
       # the windows target, clang needs the mingw-w64 Windows SDK headers.
-      - name: Install libclang + mingw headers (bindgen)
+      # clang 17 is pinned: llvm-18's mmintrin.h conflicts with mingw headers
+      # (incompatible vector types) while cross-parsing windows.h.
+      - name: Install libclang-17 + mingw headers (bindgen)
         run: |
           sudo apt-get update
-          sudo apt-get install -y libclang-dev gcc-mingw-w64-x86-64
+          sudo apt-get install -y libclang-17-dev gcc-mingw-w64-x86-64
       - name: Cross-compile check
         env:
+          LIBCLANG_PATH: /usr/lib/llvm-17/lib
           BINDGEN_EXTRA_CLANG_ARGS_x86_64_pc_windows_msvc: >-
             -I/usr/x86_64-w64-mingw32/include
         run: cargo check --workspace --all-targets --target ${{ matrix.target }}
