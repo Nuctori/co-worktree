@@ -1598,7 +1598,7 @@ fn filetime_from_systemtime(t: std::time::SystemTime) -> u64 {
     let dur = t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default();
     let secs = dur.as_secs() as i128 + 11_644_473_600;
     let sub = dur.subsec_nanos() as i128 / 100;
-    ((secs * 10_000_000 + sub) as u64)
+    (secs * 10_000_000 + sub) as u64
 }
 
 #[cfg(unix)]
