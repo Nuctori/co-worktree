@@ -18,14 +18,14 @@ cargo install --path crates/cowt --bin cowt   # 或从 Releases 下载单二进�
 macOS 与 Windows：
 
 ```sh
-# macOS: FUSE-T（kext-less FUSE，经 NFS 实现）——无内核扩展、无批准弹窗
+# macOS: FUSE-T（kext-less FUSE，经 NFS 实现）——无内核扩展、无批准弹窗、无需 root
 cargo install --path crates/cowt --bin cowt   # 或从 Releases 下载
-sudo bash scripts/macos/install-fuse-t.sh     # 一次性安装 FUSE-T + 链接 libfuse
-sudo cowt run vscode -- code                  # run 需要 sudo（mount 是特权操作）
+bash scripts/macos/install-fuse-t.sh          # 一次性安装 FUSE-T + 链接 libfuse
+cowt run vscode -- code
 
 # Windows: 需要 WinFsp（签名内核驱动 + 用户态 DLL）
 choco install winfsp                  # 或从 https://winfsp.dev 安装
-cowt run vscode -- code              # 无需管理员（junction 无特权要求）
+cowt run vscode -- code              # 无需管理员
 ```
 
 `cowt doctor` 在任何平台上报告后端可用性。
@@ -80,7 +80,7 @@ cowt drop vscode                  # 进程在跑会拒绝；--force 先杀进程
 | 平台 | 后端 | 要求 | 特点 |
 | --- | --- | --- | --- |
 | Linux | kernel overlayfs（root）/ kernel overlayfs+userns（非 root）/ fuse-overlayfs（兜底） | fuse-overlayfs 包 | 运行时自动探测；删除落为 whiteout（char dev 0:0 原名 / `.wh.` 前缀零大小文件两种编码均支持解析） |
-| macOS | FUSE-T 用户态 CoW 文件系统（`fuser` 绑定，经 NFS 实现，kext-less） | 安装 FUSE-T（`scripts/macos/install-fuse-t.sh`）+ root | 无内核扩展（macFUSE kext 无法在 CI 无人值守批准；Apple 移除了内核 union mount）；运行期宿主目录移到 `state/<id>/real`，原路径变 symlink → 挂载视图；删除落为 `.wh.` whiteout |
+| macOS | FUSE-T 用户态 CoW 文件系统（`fuser` 绑定，经 NFS 实现，kext-less、无特权） | 安装 FUSE-T（`scripts/macos/install-fuse-t.sh`） | 无需 root；无内核扩展（macFUSE kext 无法在 CI 无人值守批准；Apple 移除了内核 union mount）；运行期宿主目录移到 `state/<id>/real`，原路径变 symlink → 挂载视图；删除落为 `.wh.` whiteout。注意：FUSE-T 的 NFS 挂载在无头 CI runner 上不可用（fuse_mount 返回但挂载不生效），核心测试仍跑、挂载用例自动跳过 |
 | Windows | WinFsp 用户态 CoW 文件系统（`winfsp` 绑定） | 安装 WinFsp（choco / 官网） | 运行期宿主目录移到 `state/<id>/real`，WinFsp 直接挂载到原路径；删除落为 `.wh.` whiteout（大小写规范化处理）；用户态 I/O 写路径开销高于内核后端 |
 
 运行时探测，无需配置；`cowt doctor` 显示当前后端。三种后端共用同一套 whiteout 编码，
