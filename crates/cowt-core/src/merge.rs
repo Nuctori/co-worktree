@@ -77,6 +77,12 @@ pub struct MergePlan {
     pub kept: Vec<PathBuf>,
     /// Paths where both sides converged to the same content.
     pub converged: Vec<PathBuf>,
+    /// Host (current) entries at plan time, keyed by path. `execute` uses
+    /// them to detect host edits landing between planning and execution
+    /// (TOCTOU) so a stale plan never overwrites fresh host data
+    /// (round-24).
+    #[serde(skip)]
+    pub expected_current: std::collections::BTreeMap<PathBuf, Entry>,
 }
 
 impl MergePlan {
@@ -129,10 +135,43 @@ pub fn plan(base: &Manifest, current: &Manifest, work: &Manifest, work_root: &Pa
                     }
                     out.operations.push(write_op(&path, entry, work_root));
                 }
-                None => out.operations.push(Operation::Delete {
-                    path,
-                    migration: false,
-                }),
+                None => {
+                    // Deleting a directory whose host content includes files
+                    // unknown to base (added by the host after fork) cannot
+                    // be applied: execute's conservative non-empty rule
+                    // would silently skip the delete, apply would report
+                    // success and advance the baseline — the deletion
+                    // intent lost forever. Surface a conflict instead
+                    // (round-24).
+                    let dir_delete = matches!(b, Some(e) if e.kind == EntryKind::Dir);
+                    if dir_delete {
+                        let host_only: Vec<&PathBuf> = current
+                            .entries
+                            .keys()
+                            .filter(|p| {
+                                p.starts_with(&path)
+                                    && **p != path
+                                    && !base.entries.contains_key(*p)
+                            })
+                            .collect();
+                        if !host_only.is_empty() {
+                            for p in host_only {
+                                out.conflicts.push(Conflict {
+                                    path: p.clone(),
+                                    kind: ConflictKind::ModifyVsDelete,
+                                    base_hash: None,
+                                    current_hash: current.entries.get(p).and_then(hash_of),
+                                    work_hash: None,
+                                });
+                            }
+                            continue;
+                        }
+                    }
+                    out.operations.push(Operation::Delete {
+                        path,
+                        migration: false,
+                    });
+                }
             }
             continue;
         }
@@ -163,6 +202,19 @@ pub fn plan(base: &Manifest, current: &Manifest, work: &Manifest, work_root: &Pa
     // children before deletes of their parents.
     out.operations.sort_by_key(op_sort_key);
     out.conflicts.sort_by(|x, y| x.path.cmp(&y.path));
+    // Snapshot the host entries for every path the plan will touch, so
+    // execute can detect host edits made after planning (round-24 TOCTOU).
+    for op in &out.operations {
+        let path = match op {
+            Operation::WriteFile { path, .. }
+            | Operation::WriteSymlink { path, .. }
+            | Operation::Mkdir { path }
+            | Operation::Delete { path, .. } => path,
+        };
+        if let Some(e) = current.entries.get(path) {
+            out.expected_current.insert(path.clone(), e.clone());
+        }
+    }
     out
 }
 
@@ -258,7 +310,7 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
         converged: plan.converged.len(),
         ..ApplyReport::default()
     };
-    let mut staged: Vec<(PathBuf, PathBuf)> = Vec::new(); // (staged file, final dest)
+    let mut staged: Vec<(PathBuf, PathBuf, PathBuf)> = Vec::new(); // (staged file, final dest, rel path)
 
     // Phase 1: stage every file body. Any failure here leaves the target
     // completely untouched.
@@ -272,14 +324,43 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
             fs::copy(source, &staged_file).map_err(|e| Error::io(source.clone(), e))?;
             // fsync the staged body so a crash mid-rename never yields zeros.
             // Write access is required: FlushFileBuffers on Windows rejects a
-            // read-only handle with ERROR_ACCESS_DENIED.
+            // read-only handle with ERROR_ACCESS_DENIED. The staged copy
+            // inherits a read-only source's mode/attribute via fs::copy, so
+            // grant write access for the fsync and restore the permissions
+            // afterwards (round-24: a read-only worktree file must not make
+            // the whole apply fail).
+            #[cfg(unix)]
+            let staged_perms = {
+                use std::os::unix::fs::PermissionsExt;
+                let p = fs::metadata(&staged_file)
+                    .map(|m| m.permissions())
+                    .map_err(|e| Error::io(staged_file.clone(), e))?;
+                let _ =
+                    fs::set_permissions(&staged_file, fs::Permissions::from_mode(p.mode() | 0o200));
+                p
+            };
+            #[cfg(not(unix))]
+            let staged_perms = {
+                let p = fs::metadata(&staged_file)
+                    .map(|m| m.permissions())
+                    .map_err(|e| Error::io(staged_file.clone(), e))?;
+                if p.readonly() {
+                    let mut w = p.clone();
+                    w.set_readonly(false);
+                    fs::set_permissions(&staged_file, w)
+                        .map_err(|e| Error::io(staged_file.clone(), e))?;
+                }
+                p
+            };
             let f = fs::OpenOptions::new()
                 .write(true)
                 .open(&staged_file)
+                .map_err(|e| Error::io(source.clone(), e))?;
+            f.sync_all().map_err(|e| Error::io(source.clone(), e))?;
+            drop(f);
+            fs::set_permissions(&staged_file, staged_perms)
                 .map_err(|e| Error::io(staged_file.clone(), e))?;
-            f.sync_all()
-                .map_err(|e| Error::io(staged_file.clone(), e))?;
-            staged.push((staged_file, dest));
+            staged.push((staged_file, dest, path.clone()));
         }
     }
 
@@ -290,6 +371,7 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
     // first cannot lose data; rename's create_dir_all covers missing parents.
     for op in &plan.operations {
         if let Operation::Mkdir { path } = op {
+            verify_unchanged(plan, target_root, path)?;
             let dest = target_root.join(path);
             // Kind migration file->dir: the old non-directory entry must go
             // before the dir can be created (the planner's migration Delete
@@ -304,11 +386,19 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
         }
     }
     for op in &plan.operations {
-        if let Operation::Delete { path, .. } = op {
+        if let Operation::Delete { path, migration } = op {
             let dest = target_root.join(path);
             let meta = fs::symlink_metadata(&dest);
             match meta {
                 Ok(m) if m.is_dir() => {
+                    // Kind-migration deletes (file->dir): the Mkdir phase
+                    // already replaced the old file with the new dir — do
+                    // NOT remove it again (round-24, was deleting the
+                    // freshly created empty dir and losing the intent).
+                    if *migration {
+                        continue;
+                    }
+                    verify_unchanged(plan, target_root, path)?;
                     // Only remove if empty; a host-created file inside means
                     // the dir is in use -> leave it (conservative).
                     if fs::remove_dir(&dest).is_ok() {
@@ -316,6 +406,7 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
                     }
                 }
                 Ok(_) => {
+                    verify_unchanged(plan, target_root, path)?;
                     fs::remove_file(&dest).map_err(|e| Error::io(dest.clone(), e))?;
                     report.deleted += 1;
                 }
@@ -323,7 +414,8 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
             }
         }
     }
-    for (staged_file, dest) in &staged {
+    for (staged_file, dest, rel) in &staged {
+        verify_unchanged(plan, target_root, rel)?;
         if let Some(p) = dest.parent() {
             fs::create_dir_all(p).map_err(|e| Error::io(p.to_path_buf(), e))?;
         }
@@ -332,6 +424,7 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
     }
     for op in &plan.operations {
         if let Operation::WriteSymlink { path, target } = op {
+            verify_unchanged(plan, target_root, path)?;
             let dest = target_root.join(path);
             write_symlink(target, &dest)?;
             report.written += 1;
@@ -393,6 +486,61 @@ fn commit_rename(staged: &Path, dest: &Path) -> Result<()> {
     do_rename(staged, dest)
 }
 
+/// Round-24 TOCTOU guard: verify the on-disk path still matches what the
+/// planner observed in `current`. A host edit landing between planning and
+/// execution must abort the apply (never silently overwrite the fresh host
+/// data); afterwards apply would re-scan and re-plan, converging cleanly.
+fn verify_unchanged(plan: &MergePlan, target_root: &Path, rel: &Path) -> Result<()> {
+    use std::time::UNIX_EPOCH;
+    let dest = target_root.join(rel);
+    let expected = match plan.expected_current.get(rel) {
+        Some(e) => e,
+        None => {
+            // Not present in the plan-time snapshot: it must not exist now.
+            if fs::symlink_metadata(&dest).is_ok() {
+                return Err(Error::io(
+                    dest,
+                    std::io::Error::other(
+                        "path appeared on the host after planning; aborting to avoid overwriting it",
+                    ),
+                ));
+            }
+            return Ok(());
+        }
+    };
+    let meta = match fs::symlink_metadata(&dest) {
+        Ok(m) => m,
+        Err(_) => {
+            return Err(Error::io(
+                dest,
+                std::io::Error::other("path disappeared from the host after planning; aborting"),
+            ))
+        }
+    };
+    let mtime_ns = meta
+        .modified()
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_nanos() as i128)
+        .unwrap_or(0);
+    let unchanged = match expected.kind {
+        EntryKind::File => {
+            meta.is_file() && meta.len() == expected.size && mtime_ns == expected.mtime_ns
+        }
+        EntryKind::Dir => meta.is_dir(),
+        EntryKind::Symlink => meta.file_type().is_symlink(),
+    };
+    if !unchanged {
+        return Err(Error::io(
+            dest,
+            std::io::Error::other(
+                "host path changed after planning; aborting to avoid overwriting it",
+            ),
+        ));
+    }
+    Ok(())
+}
+
 /// Move the staged body into place. On unix `rename(2)` atomically replaces
 /// the destination; Windows `MoveFile` refuses to overwrite, so the old file
 /// is removed first — the commit is no longer atomic there, but the staging
@@ -404,6 +552,27 @@ fn do_rename(staged: &Path, dest: &Path) -> Result<()> {
 
 #[cfg(not(unix))]
 fn do_rename(staged: &Path, dest: &Path) -> Result<()> {
-    let _ = fs::remove_file(dest); // replace: Windows rename fails if dest exists
-    fs::rename(staged, dest).map_err(|e| Error::io(dest.to_path_buf(), e))
+    // Windows MoveFile refuses to overwrite an existing destination. Blindly
+    // removing it first would lose the old file if the subsequent rename
+    // fails (and retry would then hit a DeleteVsModify conflict). Move the
+    // old file aside instead and restore it on failure (round-24).
+    let backup = dest.with_extension(format!("cowt-old-{}", std::process::id()));
+    let had_old = fs::symlink_metadata(dest).is_ok();
+    if had_old {
+        fs::rename(dest, &backup).map_err(|e| Error::io(dest.to_path_buf(), e))?;
+    }
+    match fs::rename(staged, dest) {
+        Ok(()) => {
+            if had_old {
+                let _ = fs::remove_file(&backup);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            if had_old {
+                let _ = fs::rename(&backup, dest); // restore the old file
+            }
+            Err(Error::io(dest.to_path_buf(), e))
+        }
+    }
 }

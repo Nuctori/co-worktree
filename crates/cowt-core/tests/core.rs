@@ -948,3 +948,210 @@ fn manifest_missing_or_corrupt_does_not_block_drop_paths() {
         plan.operations
     );
 }
+
+// ---------------------------------------------------------------- R24
+
+/// Round-24: a file→empty-dir migration must leave the freshly created
+/// directory in place. The migration Delete (order 0) runs in the later
+/// Delete phase, after Mkdir created the dir — removing it would lose the
+/// "create empty dir" intent while still reporting written=1, deleted=1.
+#[test]
+fn merge_file_to_empty_dir_migration_keeps_dir() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "x", "v1");
+    write(&host, "x", "v1");
+    fs::create_dir_all(work.join("x")).unwrap(); // empty dir in work
+
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan.is_clean(), "conflicts: {:?}", plan.conflicts);
+    let report = merge::execute(&plan, &host).unwrap();
+    assert!(
+        host.join("x").is_dir(),
+        "file->empty-dir migration must leave the dir (was deleted by migration Delete)"
+    );
+    assert_eq!(report.written, 1);
+    assert_eq!(
+        report.deleted, 0,
+        "migration delete must not remove the new dir"
+    );
+}
+
+/// Round-24: deleting a directory in the worktree while the host added a
+/// file inside it (absent from base) must conflict — not silently skip the
+/// delete, advance the baseline and lose the intent.
+#[test]
+fn dir_delete_with_host_only_file_conflicts() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "d/f.txt", "base");
+    write(&host, "d/f.txt", "base");
+    write(&host, "d/extra.txt", "host-only"); // not in base, not in work
+                                              // worktree deleted the whole dir (work is empty).
+
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(
+        !plan.is_clean(),
+        "host-only file under a worktree-deleted dir must conflict: {:?}",
+        plan.conflicts
+    );
+    assert!(plan
+        .conflicts
+        .iter()
+        .any(|c| c.path == PathBuf::from("d/extra.txt")
+            && c.kind == merge::ConflictKind::ModifyVsDelete));
+}
+
+/// Round-24: a host edit landing between planning and execution must abort
+/// the apply instead of being silently overwritten (TOCTOU).
+#[test]
+fn execute_toctou_plan_divergence_aborts() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "x.txt", "v1");
+    write(&host, "x.txt", "v1");
+    write(&work, "x.txt", "v2");
+
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan.is_clean());
+    // Host edits the target AFTER planning (the apply window).
+    fs::write(host.join("x.txt"), "HOST-EDIT").unwrap();
+    assert!(
+        merge::execute(&plan, &host).is_err(),
+        "host change after planning must abort execute"
+    );
+    assert_eq!(
+        fs::read_to_string(host.join("x.txt")).unwrap(),
+        "HOST-EDIT",
+        "host edit must survive the aborted apply"
+    );
+}
+
+/// Round-24: a read-only source file (worktree side) must not make apply
+/// fail — the staged copy inherits the read-only mode and the fsync write
+/// open would EACCES/ACCESS_DENIED.
+#[test]
+fn apply_readonly_source_file_succeeds() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "x.txt", "v1");
+    write(&host, "x.txt", "v1");
+    write(&work, "x.txt", "v2-readonly");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(work.join("x.txt"), fs::Permissions::from_mode(0o444)).unwrap();
+    }
+    #[cfg(windows)]
+    {
+        let mut p = fs::metadata(work.join("x.txt")).unwrap().permissions();
+        p.set_readonly(true);
+        fs::set_permissions(work.join("x.txt"), p).unwrap();
+    }
+
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan.is_clean());
+    merge::execute(&plan, &host).unwrap();
+    assert_eq!(
+        fs::read_to_string(host.join("x.txt")).unwrap(),
+        "v2-readonly",
+        "read-only source must still be applied"
+    );
+}
+
+/// Round-24 regression: partial failure retry converges and leaves no
+/// staging residue; the staging dir is outside the target and never scanned.
+#[test]
+fn execute_partial_failure_retry_converges() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "a.txt", "v1");
+    write(&base, "b.txt", "v1");
+    write(&host, "a.txt", "v1");
+    write(&host, "b.txt", "v1");
+    write(&work, "a.txt", "v2");
+    write(&work, "b.txt", "v2");
+
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan.is_clean());
+    // Make the second commit fail: block b.txt's destination with a
+    // non-empty dir (commit_rename removes only empty dirs).
+    fs::remove_file(host.join("b.txt")).unwrap();
+    fs::create_dir(host.join("b.txt")).unwrap();
+    fs::write(host.join("b.txt/blocker"), "x").unwrap();
+    let err = merge::execute(&plan, &host);
+    assert!(err.is_err(), "blocked destination must fail the commit");
+    // a.txt was already committed before the failure.
+    assert_eq!(
+        fs::read_to_string(host.join("a.txt")).unwrap(),
+        "v2",
+        "already-committed file survives the failed apply"
+    );
+    // Retry after restoring the host file (the failed path stays untouched)
+    // converges: the committed file converges, the rest applies.
+    fs::remove_dir_all(host.join("b.txt")).unwrap();
+    fs::write(host.join("b.txt"), "v1").unwrap();
+    let plan2 = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(
+        plan2.is_clean(),
+        "retry must plan clean: {:?}",
+        plan2.conflicts
+    );
+    let report = merge::execute(&plan2, &host).unwrap();
+    assert_eq!(fs::read_to_string(host.join("b.txt")).unwrap(), "v2");
+    assert_eq!(
+        report.written, 1,
+        "only b.txt needs writing; a.txt converged"
+    );
+    assert_eq!(report.converged, 1);
+    // No staging residue anywhere.
+    let leftovers: Vec<_> = fs::read_dir(tmp.path())
+        .unwrap()
+        .flatten()
+        .filter(|e| e.file_name().to_string_lossy().starts_with(".cowt-apply-"))
+        .collect();
+    assert!(leftovers.is_empty(), "staging residue: {leftovers:?}");
+}
+
+/// Round-24: a stray staging dir (crash residue) must never appear in a
+/// manifest scan of the target.
+#[test]
+fn staging_dir_not_scanned_by_manifest_scan() {
+    let tmp = TempDir::new().unwrap();
+    let target = tmp.path().join("target");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("real.txt"), "x").unwrap();
+    // Simulate a crash-left staging sibling.
+    let parent = tmp.path();
+    fs::create_dir_all(parent.join(".cowt-apply-999-1")).unwrap();
+    fs::write(parent.join(".cowt-apply-999-1/leak.txt"), "leak").unwrap();
+
+    let m = Manifest::scan(&target).unwrap().manifest;
+    assert!(m.get(Path::new("leak.txt")).is_none());
+    assert!(m.get(Path::new("real.txt")).is_some());
+}

@@ -1,6 +1,8 @@
 //! `cowt run <ID> -- <CMD...>` — run a process in the merged virtual view.
 
-use anyhow::{bail, Result};
+use std::fs;
+
+use anyhow::{bail, Context, Result};
 
 use crate::backend::{default_backend, recover_stale_mount};
 use crate::state::State;
@@ -31,6 +33,12 @@ pub fn run(args: RunArgs) -> Result<i32> {
 
     let upper = dir.join("upper");
     let work = dir.join("work");
+    // Self-heal a crashed apply (round-24): a kill -9 between apply's
+    // remove_dir_all(upper) and create_dir_all(upper) leaves the layer
+    // missing — the mount needs it to exist.
+    fs::create_dir_all(&upper)
+        .with_context(|| format!("create upper layer {}", upper.display()))?;
+    fs::create_dir_all(&work).with_context(|| format!("create work layer {}", work.display()))?;
     let pidfile = dir.join("run.pid");
     let code = backend.run_isolated(
         &meta.target,

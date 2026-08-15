@@ -25,6 +25,17 @@ const OPAQUE_MARKER: &str = ".wh..wh..opq";
 pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
     let mut entries: BTreeMap<PathBuf, Entry> = base.entries.clone();
 
+    // A missing upper layer (kill -9 between apply's remove_dir_all and
+    // create_dir_all, round-24) is semantically an empty upper — self-heal
+    // instead of erroring: diff/apply can proceed, and apply recreates it.
+    if !upper.is_dir() {
+        eprintln!(
+            "cowt: warning: upper layer {} is missing (crashed apply?); treating it as empty",
+            upper.display()
+        );
+        return Ok(base.clone());
+    }
+
     // Scan the upper layer itself. Special overlayfs artifacts (whiteouts)
     // are character devices; Manifest::scan skips special files with a
     // warning, so we handle them separately by walking raw metadata.

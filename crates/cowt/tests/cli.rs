@@ -805,13 +805,15 @@ fn corrupted_state_recovery_paths() {
     let out = env.cowt().args(["diff", "demo"]).output().unwrap();
     assert!(out.status.success(), "garbage run.pid must not break diff");
 
-    // Missing upper: diff degrades (io error) but drop still works.
+    // Missing upper: diff self-heals (round-24 treats it as an empty layer)
+    // and drop still works.
     fs::remove_dir_all(&upper).unwrap();
     fs::remove_file(dir.join("run.pid")).unwrap();
     let out = env.cowt().args(["diff", "demo"]).output().unwrap();
     assert!(
-        !out.status.success(),
-        "missing upper must be reported by diff"
+        out.status.success(),
+        "missing upper must self-heal in diff: {}",
+        String::from_utf8_lossy(&out.stderr)
     );
     let out = env
         .cowt()

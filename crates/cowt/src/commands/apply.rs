@@ -116,6 +116,20 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
     }
 
     let report = merge::execute(&plan, &meta.target)?;
+    // Round-24: re-check the gates AFTER the commit phase too — a `cowt run`
+    // started mid-execute (during the unbounded staging phase) would be
+    // writing into upper; clearing upper and advancing the baseline now
+    // would destroy its writes. Refuse to finalize; the changes are on the
+    // host but the worktree stays "not applied" so the run's data survives.
+    if State::running_pid(&dir).is_some() || default_backend().is_mounted(&meta.target) {
+        bail!(
+            "worktree '{}' started running while changes were being applied; \
+             NOT advancing the baseline (the running process keeps its upper layer). \
+             Run `cowt apply {}` again after it exits",
+            meta.id,
+            meta.id
+        );
+    }
     // Advance the baseline: the host now matches the merged result, so the
     // next run/diff/apply iterates against THIS state rather than the stale
     // fork snapshot (fixes apply→run→apply false conflicts, silently

@@ -116,6 +116,35 @@ All notable changes to co-worktree are documented here.
 - Regression locks: 22-variant manifest corruption matrix, and recovery
   paths (missing manifest/upper, garbage run.pid never block drop).
 
+### Added — round 24 (apply failure atomicity / partial-apply rollback)
+
+- File→empty-dir kind migration no longer deletes the freshly created
+  directory (the migration Delete ran after Mkdir and removed it, losing
+  the "create dir" intent while reporting written=1 deleted=1).
+- Deleting a directory whose host content includes files unknown to base
+  now conflicts instead of silently skipping the delete, reporting success
+  and advancing the baseline (deletion intent was lost forever).
+- TOCTOU guard: every destructive apply operation re-verifies the host
+  path still matches the plan-time snapshot (size/mtime/kind) before
+  touching it — a host edit landing between planning and execution aborts
+  the apply instead of being silently overwritten.
+- A read-only worktree file (mode 444 / read-only attribute) no longer
+  makes the whole apply fail: the staged copy gets temporary write access
+  for fsync, then its permissions are restored before the rename.
+- Windows rename is now backup-and-restore: a failed MoveFile no longer
+  leaves the destination missing (old file is moved aside, restored on
+  failure) — previously a failed remove-then-rename lost both old and new
+  content and retry dead-locked in a DeleteVsModify conflict.
+- A missing `upper/` layer (kill -9 between apply's reset steps) is
+  self-healed: diff/apply treat it as empty, run recreates it.
+- `apply` re-checks the run/mount gates after the commit phase — a `cowt
+  run` started mid-apply no longer has its upper-layer writes destroyed by
+  the baseline advance + layer reset.
+- Error paths now reference the worktree source path instead of the
+  internal `.cowt-apply-*` staging path.
+- Regression locks: partial-failure retry convergence, staging residue
+  isolation (staging is outside the target and never scanned).
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX
