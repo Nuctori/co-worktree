@@ -94,7 +94,8 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
     }
 
     let report = merge::execute(&plan, &meta.target)?;
-    let meta = meta;
+    let mut meta = meta;
+    meta.status = Status::Applied;
     State::write_meta(&dir, &meta)?;
 
     if args.json {
