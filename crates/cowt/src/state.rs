@@ -55,6 +55,15 @@ impl State {
         };
         fs::create_dir_all(&root)
             .with_context(|| format!("create state root {}", root.display()))?;
+        // The state dir holds the moved-aside host directory and the upper
+        // layer (isolated writes). Lock it to the owner: a world-readable
+        // state root would let other local users read the isolation layer
+        // and silently misread an unreadable upper as "no changes".
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&root, fs::Permissions::from_mode(0o700));
+        }
         Ok(Self { root })
     }
 

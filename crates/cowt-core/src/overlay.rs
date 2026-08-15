@@ -28,7 +28,13 @@ pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
     // Scan the upper layer itself. Special overlayfs artifacts (whiteouts)
     // are character devices; Manifest::scan skips special files with a
     // warning, so we handle them separately by walking raw metadata.
-    let scan = Manifest::scan(upper)?.manifest;
+    let scan = Manifest::scan(upper)?;
+    // Unreadable upper entries (e.g. another user's worktree) silently
+    // collapse to "no changes" if dropped here — surface them loudly.
+    for (p, why) in scan.warnings.iter().take(10) {
+        eprintln!("cowt: warning: unreadable in upper: {}: {why}", p.display());
+    }
+    let scan = scan.manifest;
 
     // 1. Whiteouts & opaque markers (character devices, invisible to scan).
     let mut deleted: Vec<PathBuf> = Vec::new();

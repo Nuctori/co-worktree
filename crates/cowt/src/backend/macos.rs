@@ -298,7 +298,14 @@ impl CowFs {
         } else {
             FileType::RegularFile
         };
-        let perm = if meta.is_dir() { 0o755 } else { 0o644 };
+        // Report the REAL permission bits: hard-coding 0644/0755 would let
+        // the kernel enforce wrong modes — a host 0600 file would show as
+        // world-readable while running, and a 0755 script would fail to
+        // exec through the view.
+        let perm = {
+            use std::os::unix::fs::PermissionsExt;
+            meta.permissions().mode() & 0o7777
+        };
         Ok(FileAttr {
             ino,
             size: meta.len(),

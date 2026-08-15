@@ -49,13 +49,26 @@ pub struct Entry {
 
 impl Entry {
     /// Content-level equality. Used by the three-way merge to decide whether
-    /// two sides carry identical content regardless of mtime noise.
+    /// two sides carry identical content regardless of mtime noise. File
+    /// permission bits count as content on unix (chmod-only changes are
+    /// real changes; copy-up preserves mode, so this stays noise-free).
     pub fn content_eq(&self, other: &Entry) -> bool {
         if self.kind != other.kind {
             return false;
         }
         match self.kind {
-            EntryKind::File => self.size == other.size && self.hash == other.hash,
+            EntryKind::File => {
+                self.size == other.size && self.hash == other.hash && {
+                    #[cfg(unix)]
+                    {
+                        self.mode == other.mode
+                    }
+                    #[cfg(not(unix))]
+                    {
+                        true
+                    }
+                }
+            }
             EntryKind::Dir => true,
             EntryKind::Symlink => self.link_target == other.link_target,
         }

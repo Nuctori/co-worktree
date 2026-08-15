@@ -41,14 +41,15 @@ fn detect_mode() -> Mode {
     })
 }
 
-/// Effective uid parsed from /proc (avoids a libc dependency).
+/// Effective uid parsed from /proc (avoids a libc dependency). "Uid:" line
+/// fields: real, effective, saved, fs — effective is field 2 (index 1).
 fn euid() -> u32 {
     std::fs::read_to_string("/proc/self/status")
         .ok()
         .and_then(|s| {
             s.lines()
                 .find(|l| l.starts_with("Uid:"))
-                .and_then(|l| l.split_whitespace().nth(2)?.parse().ok())
+                .and_then(|l| l.split_whitespace().nth(1)?.parse().ok())
         })
         .unwrap_or(u32::MAX)
 }

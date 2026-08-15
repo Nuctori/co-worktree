@@ -150,6 +150,9 @@ Windows cross-compile check, release builds for all three.
   bypasses isolation — the same class as a program writing any absolute
   path outside. Not a sandbox; `upper` is never polluted, so diff/apply
   stay truthful.
+- **Windows: apply to a read-only host file fails** with a generic error
+  (delete-then-rename cannot replace a READONLY-attribute file; clear the
+  attribute first). Unix `rename(2)` replaces it atomically.
 
 ## Performance
 
