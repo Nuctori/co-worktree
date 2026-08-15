@@ -304,7 +304,7 @@ impl CowFs {
         // exec through the view.
         let perm = {
             use std::os::unix::fs::PermissionsExt;
-            meta.permissions().mode() & 0o7777
+            (meta.permissions().mode() & 0o7777) as u16
         };
         Ok(FileAttr {
             ino,
