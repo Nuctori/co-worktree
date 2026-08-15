@@ -67,7 +67,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
         eprintln!(
             "cowt: warning: {} is still mounted after the run; \
              the worktree keeps its run.pid marker so `cowt drop --force` can clean it up",
-            meta.target.display()
+            crate::state::sanitize_display(&meta.target.display().to_string())
         );
     }
     // The moved-aside host dir must be back. If it is not (e.g. the macOS
@@ -79,7 +79,7 @@ pub fn run(args: RunArgs) -> Result<i32> {
         eprintln!(
             "cowt: ERROR: the host directory was NOT restored — it is still at {}. \
              Fix the mount point state before dropping this worktree",
-            dir.join("real").display()
+            crate::state::sanitize_display(&dir.join("real").display().to_string())
         );
         return Ok(1);
     }

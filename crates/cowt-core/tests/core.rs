@@ -1579,3 +1579,56 @@ fn symlink_manifest_round_trip() {
         "symlink whiteout must fold"
     );
 }
+
+// ---------------------------------------------------------------- R29
+
+/// Round-29: a non-UTF-8 filename must be SKIPPED with a warning (not
+/// hard-fail the whole scan/serialization) — fork/apply keep working.
+#[cfg(unix)]
+#[test]
+fn scan_skips_non_utf8_filenames_with_warning() {
+    use std::ffi::OsStr;
+    use std::os::unix::ffi::OsStrExt;
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    fs::create_dir_all(&d).unwrap();
+    write(&d, "ok.txt", "fine");
+    // bad\xff.txt — invalid UTF-8 filename.
+    let bad = OsStr::from_bytes(b"bad\xff.txt");
+    fs::write(d.join(bad), "x").unwrap();
+
+    let out = Manifest::scan(&d).unwrap();
+    assert!(
+        out.manifest.get(Path::new("ok.txt")).is_some(),
+        "good file must be scanned"
+    );
+    assert!(
+        out.manifest.entries.keys().all(|k| k.to_str().is_some()),
+        "no non-UTF-8 keys may reach the manifest"
+    );
+    assert!(
+        out.warnings.iter().any(|(_, w)| w.contains("non-UTF-8")),
+        "the skip must be warned: {:?}",
+        out.warnings
+    );
+    // And serialization must now succeed (it would have hard-failed
+    // before the skip).
+    let json = out.manifest.to_json().unwrap();
+    assert!(json.contains("ok.txt"));
+}
+
+/// Round-29: NFC and NFD spellings of the same name are distinct byte keys
+/// on Linux (ext4 normalization-sensitive) — locking that semantics.
+#[cfg(unix)]
+#[test]
+fn nfc_nfd_are_distinct_keys_on_unix() {
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    fs::create_dir_all(&d).unwrap();
+    write(&d, "caf\u{e9}.txt", "nfc"); // U+00E9 precomposed
+    write(&d, "cafe\u{301}.txt", "nfd"); // e + combining acute
+    let m = Manifest::scan(&d).unwrap().manifest;
+    assert_eq!(m.entries.len(), 2, "both spellings are separate files");
+    assert!(m.get(Path::new("caf\u{e9}.txt")).is_some());
+    assert!(m.get(Path::new("cafe\u{301}.txt")).is_some());
+}

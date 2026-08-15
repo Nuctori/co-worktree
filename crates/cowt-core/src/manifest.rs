@@ -189,15 +189,25 @@ impl Manifest {
                 Ok(r) => r.to_path_buf(),
                 Err(_) => return Err(Error::BoundaryEscape(abs.to_path_buf())),
             };
-            // Defense in depth: reject any relative component that could climb
-            // out of the base (walkdir never yields these when links are not
-            // followed, but the invariant is load-bearing).
-            if rel
-                .components()
-                .any(|c| matches!(c, std::path::Component::ParentDir))
-            {
-                return Err(Error::BoundaryEscape(abs.to_path_buf()));
+            // Non-UTF-8 paths cannot be serialized into the JSON manifest
+            // (serde rejects them). Skipping with a warning (like special
+            // files) keeps fork/apply working instead of hard-failing or
+            // wedging forever on an unserializable entry (round-29).
+            if rel.to_str().is_none() {
+                warnings.push((rel.clone(), "non-UTF-8 filename skipped".into()));
+                continue;
             }
+            // macOS: APFS is normalization-insensitive — readdir may return
+            // NFD while a program later spells the same file NFC, and the
+            // byte-exact whiteout match would miss the deletion. Canonicalize
+            // keys to NFC so every spelling of a name compares equal
+            // (round-29).
+            #[cfg(target_os = "macos")]
+            let rel: PathBuf = {
+                let s = rel.to_string_lossy();
+                let nfc = unicode_normalization::UnicodeNormalization::nfc(&*s).collect::<String>();
+                PathBuf::from(nfc)
+            };
 
             let meta = match fs::symlink_metadata(abs) {
                 Ok(m) => m,
@@ -261,7 +271,15 @@ impl Manifest {
                     }
                 }
                 EntryKind::Symlink => match fs::read_link(abs) {
-                    Ok(t) => entry.link_target = Some(t),
+                    Ok(t) => {
+                        // A non-UTF-8 link target cannot be serialized into
+                        // the manifest either (round-29).
+                        if t.to_str().is_none() {
+                            warnings.push((rel.clone(), "non-UTF-8 symlink target skipped".into()));
+                            continue;
+                        }
+                        entry.link_target = Some(t);
+                    }
                     Err(e) => warnings.push((rel.clone(), e.to_string())),
                 },
                 EntryKind::Dir => {}

@@ -225,6 +225,23 @@ All notable changes to co-worktree are documented here.
   clear_running ownership; write_pidfile replaces recycled/rejects live
   markers; cli-level garbage-pidfile and recycled-pid run tests.
 
+### Added — round 29 (unicode: NFC/NFD normalization, non-UTF-8 names)
+
+- A non-UTF-8 filename (or symlink target) is now SKIPPED with a warning
+  instead of hard-failing the whole `fork` — one bad name in a 10k-file
+  tree no longer refuses everything, and `apply` no longer wedges forever
+  on an unserializable baseline entry.
+- macOS: manifest keys are canonicalized to NFC at scan time — APFS is
+  normalization-insensitive, and a deletion spelled with a different
+  normalization (NFC vs NFD) previously wrote a whiteout that never
+  matched the base key, silently dropping the deletion intent.
+- `sanitize_display` also strips Unicode format characters (bidi
+  overrides, zero-width spaces, BOM) that `is_control()` misses, and the
+  raw `meta.target` prints in `run`/`drop` now go through it — an ESC byte
+  in a directory name can no longer inject terminal sequences.
+- Regression locks: non-UTF-8 skip-with-warning; NFC/NFD distinct keys on
+  normalization-sensitive filesystems.
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX

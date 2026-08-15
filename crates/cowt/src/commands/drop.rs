@@ -92,7 +92,10 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
                     meta.target.display()
                 );
             }
-            eprintln!("cowt: --force: unmounting {}", meta.target.display());
+            eprintln!(
+                "cowt: --force: unmounting {}",
+                crate::state::sanitize_display(&meta.target.display().to_string())
+            );
             let _ = backend.unmount(&meta.target); // tolerate races; verify below
             std::thread::sleep(std::time::Duration::from_millis(100));
         }

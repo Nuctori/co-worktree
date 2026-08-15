@@ -293,11 +293,24 @@ impl State {
 
 /// Terminal-safe rendering: control bytes (other than tab/CR/LF) become
 /// U+FFFD so hostile file names or contents cannot inject ANSI/OSC
-/// sequences via cowt's human output.
+/// sequences via cowt's human output. Also strips Unicode format
+/// characters (bidi overrides, zero-width spaces — `is_control()` does not
+/// cover the Cf category) that can visually spoof filenames (round-29).
 pub fn sanitize_display(s: &str) -> String {
     s.chars()
         .map(|c| {
-            if c.is_control() && !matches!(c, '\t' | '\n' | '\r') {
+            let format_char = matches!(
+                c as u32,
+                // bidi controls
+                0x202A..=0x202E
+                // zero-width / joiners
+                | 0x200B..=0x200F
+                // other format controls
+                | 0x2060..=0x206F
+                // BOM / word joiner
+                | 0xFEFF
+            );
+            if (c.is_control() && !matches!(c, '\t' | '\n' | '\r')) || format_char {
                 '\u{FFFD}'
             } else {
                 c
