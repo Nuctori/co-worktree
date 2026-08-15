@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use cowt_core::{merge, overlay, Manifest};
 
 use crate::backend::{default_backend, recover_stale_mount};
-use crate::state::State;
+use crate::state::{State, Status};
 
 pub struct ApplyArgs {
     pub id: String,
