@@ -52,6 +52,10 @@ All notable changes to co-worktree are documented here.
   process, alive) from `ERROR_INVALID_PARAMETER` (no such pid).
 - `cowt drop --force` only unmounts mounts proven to be our own stale
   leftovers; foreign mounts are refused even with `--force`.
+- macOS: the recycled-pid guard (`drop --force` must not kill an innocent
+  process whose pid was reused after a crash) now works — the pidfile
+  starttime comes from `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)`, with the FFI
+  layout pinned by a size/offset unit test.
 
 ### Known limitations
 
