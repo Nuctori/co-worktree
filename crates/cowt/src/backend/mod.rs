@@ -269,7 +269,6 @@ pub(crate) fn process_starttime(pid: u32) -> Option<u128> {
         }
     }
     #[cfg(all(unix, not(target_os = "macos")))]
-    #[cfg(all(unix, not(target_os = "macos")))]
     {
         let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
         let after_comm = stat.rfind(')')?;
