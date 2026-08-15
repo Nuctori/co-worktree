@@ -113,8 +113,8 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
 
     println!(
         "dropped worktree {} ({}): isolated data deleted, host directory untouched",
-        meta.id,
-        meta.target.display()
+        crate::state::sanitize_display(&meta.id),
+        crate::state::sanitize_display(&meta.target.display().to_string())
     );
     Ok(())
 }

@@ -27,10 +27,10 @@ pub fn list(json_out: bool) -> Result<()> {
         println!(
             "{:<10} {:<20} {:<9} {:<9} {}",
             m.id,
-            m.name.clone().unwrap_or_else(|| "-".into()),
+            crate::state::sanitize_display(&m.name.clone().unwrap_or_else(|| "-".into())),
             status,
             m.backend,
-            m.target.display()
+            crate::state::sanitize_display(&m.target.display().to_string())
         );
     }
     Ok(())
@@ -58,7 +58,7 @@ pub fn status(id: &str, json_out: bool) -> Result<()> {
     } else {
         println!("id:        {}", meta.id);
         if let Some(n) = &meta.name {
-            println!("name:      {n}");
+            println!("name:      {}", crate::state::sanitize_display(n));
         }
         println!("target:    {}", meta.target.display());
         println!("status:    {}", effective_status(&state, &meta));

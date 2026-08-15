@@ -475,3 +475,41 @@ fn drop_refuses_while_running() {
     // Mount / junction gone.
     assert_mount_gone(&env.target);
 }
+
+#[test]
+fn resolve_rejects_path_traversal_ids() {
+    let env = Env::new();
+    // Seed a victim directory OUTSIDE the state root with a meta.json.
+    let victim = env._tmp.path().join("victim");
+    fs::create_dir_all(&victim).unwrap();
+    fs::write(victim.join("important.txt"), "keep me\n").unwrap();
+    let fake_meta = serde_json::json!({
+        "id": "victim",
+        "name": "victim",
+        "target": victim,
+        "created_epoch": 0,
+        "status": "ready",
+        "backend": "test"
+    });
+    fs::write(
+        victim.join("meta.json"),
+        serde_json::to_string_pretty(&fake_meta).unwrap(),
+    )
+    .unwrap();
+
+    // `drop ../victim` must be refused — and must NOT delete the victim.
+    let out = env.cowt().args(["drop", "../victim"]).output().unwrap();
+    assert!(!out.status.success(), "traversal drop must be refused");
+    assert!(
+        victim.join("important.txt").exists(),
+        "victim directory must survive"
+    );
+    // Same for diff/apply/status.
+    for cmd in ["diff", "apply", "status"] {
+        let out = env.cowt().args([cmd, "../victim"]).output().unwrap();
+        assert!(
+            !out.status.success(),
+            "{cmd} with traversal id must be refused"
+        );
+    }
+}

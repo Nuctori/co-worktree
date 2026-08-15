@@ -57,10 +57,20 @@ pub trait Backend: Send + Sync {
         pidfile: &Path,
     ) -> Result<i32> {
         let mut guard = self.mount(lower, upper, work, mountpoint)?;
-        let mut child = std::process::Command::new(&cmd[0])
-            .args(&cmd[1..])
-            .spawn()
-            .map_err(|e| anyhow::anyhow!("spawn '{}': {e}", cmd[0]))?;
+        let mut child = match std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
+            Ok(c) => c,
+            Err(e) => {
+                // The mount is up and the host dir sits in `real`: tear the
+                // mount down explicitly (teardown drops the in-process host
+                // FIRST, so the unmount can succeed — relying on Drop would
+                // unmount while the WinFsp/FUSE-T host is still alive and
+                // strand the host directory in `real`).
+                if let Err(te) = guard.teardown() {
+                    eprintln!("cowt: warning: unmount failed: {te:#}");
+                }
+                return Err(anyhow::anyhow!("spawn '{}': {e}", cmd[0]));
+            }
+        };
         write_pidfile(pidfile, child.id()).inspect_err(|_| {
             reap_orphan_child(&mut child);
         })?;

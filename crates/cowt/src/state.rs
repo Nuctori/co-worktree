@@ -114,7 +114,20 @@ impl State {
     }
 
     /// Resolve an id-or-name to a worktree directory.
+    ///
+    /// Ids/names are single path components: anything with separators or
+    /// parent-dir components cannot be a worktree and would resolve outside
+    /// the state root (a hostile or mistyped id like `../victim` would let
+    /// `drop` delete an arbitrary directory).
     pub fn resolve(&self, id_or_name: &str) -> Result<PathBuf> {
+        if id_or_name.is_empty()
+            || id_or_name == ".."
+            || id_or_name.contains('/')
+            || id_or_name.contains('\\')
+            || id_or_name.contains("..")
+        {
+            bail!("invalid worktree id or name '{id_or_name}'");
+        }
         let direct = self.dir(id_or_name);
         if direct.join("meta.json").exists() {
             return Ok(direct);

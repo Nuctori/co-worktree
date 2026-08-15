@@ -83,7 +83,7 @@ pub fn fork(args: ForkArgs) -> Result<()> {
         .count();
     println!("forked worktree {}", meta.id);
     if let Some(n) = &meta.name {
-        println!("  name:    {n}");
+        println!("  name:    {}", crate::state::sanitize_display(n));
     }
     println!(
         "  target:  {}",
