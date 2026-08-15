@@ -1482,3 +1482,65 @@ fn e2e_path_traversal_blocked() {
     );
     env.cowt_ok(&["drop", &id]);
 }
+
+/// Adversarial: a symlink/junction ring planted in the upper layer (any
+/// process can create one during `cowt run`) must not make diff/apply walk
+/// an external tree or crash (stack overflow — reproduced pre-fix).
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_symlink_ring_no_crash() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let (app, id) = seeded_app(&env);
+
+    // Plant the ring OUTSIDE first (before spawning), so the SKIP branch
+    // cannot leave an un-waited `cowt run` behind.
+    let outside = env.tmp.path().join("ring-outside");
+    fs::create_dir_all(outside.join("sub")).unwrap();
+    fs::write(outside.join("sub/deep.txt"), "x\n".repeat(5000)).unwrap();
+    let ring_src = outside.join("ring");
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&outside, &ring_src).is_ok();
+    #[cfg(windows)]
+    let made = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&ring_src)
+        .arg(&outside)
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if !made {
+        eprintln!("SKIP: cannot create link on this host");
+        return;
+    }
+
+    let mut sleeper = spawn_sleeper(&env, &id, 6);
+    // Link inside the view -> lands in upper.
+    let view_link = app.join("planted-link");
+    #[cfg(unix)]
+    let _ = std::os::unix::fs::symlink(&outside, &view_link);
+    #[cfg(windows)]
+    let _ = std::process::Command::new("cmd")
+        .args(["/C", "mklink", "/J"])
+        .arg(&view_link)
+        .arg(&outside)
+        .status();
+    wait_run(&mut sleeper);
+    assert_mount_gone(&app);
+
+    // diff must terminate (no stack overflow, no external walk).
+    let json = env.cowt_ok(&["diff", &id, "--json"]);
+    assert!(
+        !json.contains("deep.txt"),
+        "diff must not walk through the planted link: {json}"
+    );
+    // apply must also terminate.
+    env.cowt_ok(&["apply", &id]);
+    assert!(
+        !app.join("deep.txt").exists(),
+        "apply must not follow the planted link"
+    );
+    env.cowt_ok(&["drop", &id]);
+}

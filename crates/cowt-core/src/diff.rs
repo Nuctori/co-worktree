@@ -10,6 +10,7 @@
 use std::collections::BTreeMap;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use serde::{Deserialize, Serialize};
 use similar::{Algorithm, TextDiff};
@@ -139,6 +140,10 @@ fn content_detail(old: &Path, new: &Path) -> ContentDiff {
     // Content enrichment loads both files fully; cap it so multi-GB files
     // cannot OOM the CLI. Structural diff still reports them as modified.
     const CONTENT_LIMIT: u64 = 64 * 1024 * 1024;
+    // Cross-file budget: 100 × 60MB modified files would otherwise pile up
+    // ~10GB of unified-diff strings in one `cowt diff --content` run.
+    const CONTENT_BUDGET: u64 = 512 * 1024 * 1024;
+    static USED: AtomicU64 = AtomicU64::new(0);
     let ok_size = |p: &Path| {
         fs::metadata(p)
             .map(|m| m.len() <= CONTENT_LIMIT)
@@ -146,6 +151,10 @@ fn content_detail(old: &Path, new: &Path) -> ContentDiff {
     };
     if !ok_size(old) || !ok_size(new) {
         return ContentDiff::Binary;
+    }
+    let new_len = fs::metadata(new).map(|m| m.len()).unwrap_or(0);
+    if USED.fetch_add(new_len, Ordering::Relaxed) > CONTENT_BUDGET {
+        return ContentDiff::Binary; // budget exhausted: structural diff only
     }
     let old_bytes = match fs::read(old) {
         Ok(b) => b,

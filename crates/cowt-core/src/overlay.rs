@@ -134,7 +134,15 @@ fn collect_whiteouts(
             continue;
         }
 
-        if path.is_dir() {
+        // Recurse only into real directories: `is_dir()` follows symlinks,
+        // and an upper-layer symlink/junction pointing at an external tree
+        // (created by any process during `cowt run`) would make every
+        // diff/apply walk that whole tree — a junction ring crashes with a
+        // stack overflow (reproduced). Never follow links here.
+        if std::fs::symlink_metadata(&path)
+            .map(|m| m.is_dir())
+            .unwrap_or(false)
+        {
             collect_whiteouts(root, &path, deleted, opaque_dirs);
         }
     }
