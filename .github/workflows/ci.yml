@@ -140,11 +140,13 @@ jobs:
         run: bash scripts/macos/install-fuse-t.sh
       - run: cargo build --release
       - name: Smoke test the binary
-        # The binary links FUSE-T's libfuse-t.dylib (rpath not embedded in
-        # release builds); point dyld at the install location.
+        # The macOS binary links FUSE-T's libfuse-t.dylib (rpath not embedded
+        # in release builds); point dyld at the install location.
+        shell: bash
         run: |
-          DYLD_LIBRARY_PATH=/usr/local/lib ./target/release/cowt --version
-          DYLD_LIBRARY_PATH=/usr/local/lib ./target/release/cowt doctor || true
+          if [ "$RUNNER_OS" = "macOS" ]; then export DYLD_LIBRARY_PATH=/usr/local/lib; fi
+          ./target/release/cowt --version
+          ./target/release/cowt doctor || true
       - uses: actions/upload-artifact@v4
         with:
           name: cowt-${{ matrix.os }}
