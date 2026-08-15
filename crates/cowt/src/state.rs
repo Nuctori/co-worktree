@@ -94,8 +94,16 @@ impl State {
             }
         }
         if let Some(name) = &meta.name {
+            if !valid_id_or_name(name) {
+                let _ = fs::remove_dir(&dir); // roll back the exclusive dir
+                bail!("invalid worktree name '{name}' (must be a single path component)");
+            }
             for other in self.list()? {
-                if other.name.as_deref() == Some(name.as_str()) {
+                // A name must not shadow an existing worktree's id either:
+                // resolve() prefers the id-direct lookup, so `fork --name
+                // <existing-id>` would create a permanently unreachable
+                // worktree, and `drop <that name>` would hit the wrong one.
+                if other.name.as_deref() == Some(name.as_str()) || other.id == *name {
                     let _ = fs::remove_dir(&dir); // roll back the exclusive dir
                     bail!("a worktree named '{name}' already exists; pick a different --name");
                 }
@@ -129,12 +137,7 @@ impl State {
     /// the state root (a hostile or mistyped id like `../victim` would let
     /// `drop` delete an arbitrary directory).
     pub fn resolve(&self, id_or_name: &str) -> Result<PathBuf> {
-        if id_or_name.is_empty()
-            || id_or_name == ".."
-            || id_or_name.contains('/')
-            || id_or_name.contains('\\')
-            || id_or_name.contains("..")
-        {
+        if !valid_id_or_name(id_or_name) {
             bail!("invalid worktree id or name '{id_or_name}'");
         }
         let direct = self.dir(id_or_name);
@@ -244,6 +247,22 @@ pub fn sanitize_display(s: &str) -> String {
         })
         .collect()
 }
+
+/// Shared id/name rule used by both `resolve()` (lookup side) and `create()`
+/// (creation side), so the tool never creates a worktree it cannot resolve:
+/// a single path component, no separators, no `.`/`..` components.
+pub fn valid_id_or_name(s: &str) -> bool {
+    !s.is_empty()
+        && s != "."
+        && s != ".."
+        && !s.contains('/')
+        && !s.contains('\\')
+        && !s.contains("..")
+}
+
+/// Atomic file write: temp file + rename (same filesystem). A kill -9
+/// mid-write leaves the old file intact instead of a truncated JSON that
+/// would brick the worktree (drop included).
 
 /// Atomic file write: temp file + rename (same filesystem). A kill -9
 /// mid-write leaves the old file intact instead of a truncated JSON that

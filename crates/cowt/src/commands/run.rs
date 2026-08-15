@@ -41,9 +41,11 @@ pub fn run(args: RunArgs) -> Result<i32> {
         &pidfile,
     );
     State::clear_running(&dir);
-    let code = code?;
+    let (code, desc) = code?;
     // The moved-aside host dir must be back. If it is not (e.g. the macOS
-    // mountpoint symlink was removed externally), say so loudly — a later
+    // mountpoint symlink was removed externally), say so loudly and force a
+    // non-zero exit — a script must be able to tell that the worktree is in
+    // a damaged state even when the child happened to exit 0. A later
     // `cowt drop` refuses to delete state that still holds the host dir.
     if dir.join("real").exists() {
         eprintln!(
@@ -51,7 +53,8 @@ pub fn run(args: RunArgs) -> Result<i32> {
              Fix the mount point state before dropping this worktree",
             dir.join("real").display()
         );
+        return Ok(1);
     }
-    eprintln!("cowt: process exited with code {code}; changes preserved in upper layer");
+    eprintln!("cowt: process {desc}; changes preserved in upper layer");
     Ok(code)
 }

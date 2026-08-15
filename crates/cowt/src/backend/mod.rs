@@ -47,6 +47,8 @@ pub trait Backend: Send + Sync {
     /// overlay via user namespace) override this with a single-shot wrapper.
     ///
     /// The implementation writes the child pid into `pidfile` once spawned.
+    /// Returns `(exit_code, human description)`; on unix a signal-killed
+    /// child is reported as such instead of a misleading "code 1".
     fn run_isolated(
         &self,
         lower: &Path,
@@ -55,7 +57,7 @@ pub trait Backend: Send + Sync {
         mountpoint: &Path,
         cmd: &[String],
         pidfile: &Path,
-    ) -> Result<i32> {
+    ) -> Result<(i32, String)> {
         let mut guard = self.mount(lower, upper, work, mountpoint)?;
         let mut child = match std::process::Command::new(&cmd[0]).args(&cmd[1..]).spawn() {
             Ok(c) => c,
@@ -96,8 +98,22 @@ pub trait Backend: Send + Sync {
             eprintln!("cowt: warning: unmount failed: {e:#}");
         }
         let status = result.map_err(|e| anyhow::anyhow!("wait for child: {e}"))?;
-        Ok(status.code().unwrap_or(1))
+        Ok(exit_code_and_desc(&status))
     }
+}
+
+/// Map a child's `ExitStatus` to `(exit_code, human description)`. On unix a
+/// signal-killed child has no exit code; report the signal instead of a
+/// misleading "code 1" (the run command still exits non-zero).
+pub(crate) fn exit_code_and_desc(status: &std::process::ExitStatus) -> (i32, String) {
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::ExitStatusExt;
+        if let Some(sig) = status.signal() {
+            return (128 + sig, format!("killed by signal {sig}"));
+        }
+    }
+    (status.code().unwrap_or(1), format!("exited with code {}", status.code().unwrap_or(1)))
 }
 
 /// After a run, kernel overlayfs may have lazily copied up a renamed lower

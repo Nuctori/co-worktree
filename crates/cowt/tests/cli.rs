@@ -566,10 +566,143 @@ fn iterative_apply_run_apply_workflow() {
     fs::write(upper.join(".wh.new.txt"), b"").unwrap();
     let out = env.cowt().args(["apply", "demo"]).output().unwrap();
     assert!(out.status.success(), "apply 3 failed");
-    assert!(out.status.success(), "apply 3 failed");
     assert!(
         !env.target.join("new.txt").exists(),
         "deletion of a previously-applied file must reach the host"
     );
     env.cowt_ok(&["drop", "demo"]);
+}
+
+// ---------------------------------------------------------------- R22
+
+/// Round-22: `fork --name` must reject names the resolver itself would
+/// refuse (empty, separators, `..` substrings) — the tool must never create
+/// a worktree it cannot resolve by name.
+#[test]
+fn fork_rejects_invalid_names() {
+    let env = Env::new();
+    for bad in ["a..b", "dir/name", "..evil", ""] {
+        let out = env
+            .cowt()
+            .args(["fork", env.target.to_str().unwrap(), "--name", bad])
+            .output()
+            .unwrap();
+        assert!(
+            !out.status.success(),
+            "fork --name {bad:?} must be refused"
+        );
+    }
+    // A name that merely contains a dot (not `..`) is still fine.
+    let out = env
+        .cowt()
+        .args(["fork", env.target.to_str().unwrap(), "--name", "a.b"])
+        .output()
+        .unwrap();
+    assert!(
+        out.status.success(),
+        "fork --name a.b must succeed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Round-22: a worktree name must not shadow an existing worktree id —
+/// resolve() prefers the id-direct lookup, so `fork --name <existing-id>`
+/// would create a worktree that is permanently unreachable by name, and
+/// `drop <that name>` would hit the WRONG worktree.
+#[test]
+fn fork_rejects_name_colliding_with_existing_id() {
+    let env = Env::new();
+    env.fork();
+    // Grab the existing worktree's id (list --json).
+    let out = env.cowt().args(["list", "--json"]).output().unwrap();
+    let v: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap();
+    let id = v[0]["id"].as_str().unwrap().to_string();
+    assert_eq!(id.len(), 16, "ids are 16 hex chars, got {id}");
+
+    // Forking with --name == existing id must be refused.
+    let out = env
+        .cowt()
+        .args(["fork", env.target.to_str().unwrap(), "--name", &id])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "fork --name <existing-id> must be refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Round-22: `resolve(".")` must be rejected exactly like `".."` (it would
+/// otherwise resolve to the state root itself and, under a misconfigured
+/// COWT_HOME pointing at a worktree dir, be treated as a real worktree).
+#[test]
+fn resolve_rejects_dot_id() {
+    let env = Env::new();
+    for bad in [".", ".."] {
+        let out = env.cowt().args(["diff", bad]).output().unwrap();
+        assert!(!out.status.success(), "diff {bad:?} must be refused");
+        assert!(
+            String::from_utf8_lossy(&out.stderr).contains("invalid worktree id or name"),
+            "stderr for {bad:?}: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// Round-22: clap parse-boundary exit codes (regression lock — these were
+/// verified by audit but had zero test coverage).
+#[test]
+fn clap_parse_errors_exit_2_and_help_exits_0() {
+    let env = Env::new();
+    // Parse errors: clap's convention is exit code 2.
+    let cases: &[&[&str]] = &[
+        &[],                                  // no subcommand
+        &["frobnicate"],                      // unknown subcommand
+        &["diff", "--frobnicate"],            // unknown flag
+        &["diff", "demo", "extra"],           // extra positional
+        &["run"],                             // missing required cmd
+        &["run", "demo"],                     // `--` + cmd missing
+        &["diff", "--json", "--json"],        // duplicate flag
+    ];
+    for args in cases {
+        let out = env.cowt().args(*args).output().unwrap();
+        assert_eq!(
+            out.status.code(),
+            Some(2),
+            "args {args:?} must exit 2, stderr: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+    // Help/version: exit 0.
+    for args in [&["--help"][..], &["--version"][..]] {
+        let out = env.cowt().args(args).output().unwrap();
+        assert!(
+            out.status.success(),
+            "args {args:?} must exit 0: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+}
+
+/// Round-22: a child killed by a signal must be reported as such (not as a
+/// bogus "exited with code 1"); the run command still exits non-zero.
+#[cfg(unix)]
+#[test]
+fn run_reports_signal_killed_child() {
+    let env = Env::new();
+    if !env.fuse_available() {
+        eprintln!("backend unavailable; skipping");
+        return;
+    }
+    env.fork();
+    // Child kills itself with SIGKILL — no exit code, only a signal.
+    let mut cowt = env.cowt();
+    cowt.args(["run", "demo", "--", "sh", "-c", "kill -9 $$"]);
+    let out = cowt.output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        err.contains("killed by signal"),
+        "signal death must be reported, stderr: {err}"
+    );
+    assert_ne!(out.status.code(), Some(0), "signal death must exit non-zero");
 }

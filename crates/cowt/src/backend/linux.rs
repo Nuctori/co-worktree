@@ -143,7 +143,8 @@ impl FuseOverlayfs {
         mountpoint: &Path,
         cmd: &[String],
         pidfile: &Path,
-    ) -> Result<i32> {
+    ) -> Result<(i32, String)> {
+        let status = Command::new("mount")
         let status = Command::new("mount")
             .arg("-t")
             .arg("overlay")
@@ -193,7 +194,7 @@ impl FuseOverlayfs {
             Err(e) => eprintln!("cowt: warning: unmount failed: {e:#}"),
         }
         let status = result.context("wait for child process")?;
-        Ok(status.code().unwrap_or(1))
+        Ok(super::exit_code_and_desc(&status))
     }
 
     /// Run `cmd` with `mountpoint` overlaid via rootless kernel overlayfs.
@@ -205,7 +206,8 @@ impl FuseOverlayfs {
         mountpoint: &Path,
         cmd: &[String],
         pidfile: &Path,
-    ) -> Result<i32> {
+    ) -> Result<(i32, String)> {
+        eprintln!(
         eprintln!(
             "cowt: kernel overlay (user namespace) over {} (upper: {})",
             mountpoint.display(),
@@ -240,7 +242,7 @@ impl FuseOverlayfs {
             }
         }
         let status = child.wait().context("wait for isolated process")?;
-        Ok(status.code().unwrap_or(1))
+        Ok(super::exit_code_and_desc(&status))
     }
 
     fn run_fuse(

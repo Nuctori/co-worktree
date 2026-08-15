@@ -75,6 +75,29 @@ All notable changes to co-worktree are documented here.
   marker, BOM, mixed endings, and 0-byte-file boundaries across
   scan/diff/merge/apply.
 
+### Added — round 22 (CLI arg boundaries / exit codes / usage)
+
+- `fork --name` now validates names with the same rule the resolver uses:
+  empty names, separators and `..` components are rejected at creation, so
+  the tool can no longer create a worktree it cannot resolve by name.
+- A worktree name can no longer shadow an existing worktree *id* (`fork
+  --name <existing-id>` is refused) — previously `drop <that name>` would
+  have hit the wrong worktree.
+- `resolve(".")` is rejected exactly like `".."` (it would otherwise resolve
+  to the state root, dangerous under a misconfigured `COWT_HOME`).
+- `cowt run` exits non-zero when it detects the host directory was NOT
+  restored (state/`<id>`/`real` residue) even if the child exited 0 — the
+  damaged state is now observable to scripts.
+- A child killed by a signal (unix) is reported as "killed by signal N" with
+  the conventional 128+N exit code, instead of a misleading "exited with
+  code 1".
+- Regression locks: clap parse boundaries exit 2 (no subcommand, unknown
+  subcommand/flag, extra positional, missing cmd, duplicate flag) and
+  `--help`/`--version` exit 0.
+- Note: `cowt doctor` intentionally exits 0 even when no backend is
+  available (it is a report command; CI and scripts parse its stdout) —
+  that contract is pinned by the E2E suite.
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX
