@@ -171,10 +171,14 @@ impl FuseOverlayfs {
             .args(&cmd[1..])
             .spawn()
             .with_context(|| format!("spawn '{}'", cmd[0]))?;
-        super::write_pidfile(pidfile, child.id()).map_err(|e| {
-            super::reap_orphan_child(&mut child);
-            e
-        })?;
+        match super::write_pidfile(pidfile, child.id()) {
+            Ok(()) => {}
+            Err(e) => {
+                super::reap_orphan_child(&mut child);
+                eprintln!("cowt: pidfile race lost: {e}");
+                return Err(anyhow::anyhow!("{e}"));
+            }
+        }
         let result = child.wait();
         // Lazy copy-up: a renamed lower dir has no materialized children in
         // upper; copy them from the still-mounted view so the offline scan
