@@ -14,12 +14,16 @@ pub struct ForkArgs {
     pub name: Option<String>,
     pub force_path: bool,
 }
-
 pub fn fork(args: ForkArgs) -> Result<()> {
     let target = args
         .path
         .canonicalize()
         .with_context(|| format!("target directory {} not found", args.path.display()))?;
+    // On Windows canonicalize returns a `\\?\` verbatim path; strip it so
+    // every later path (mount, restore, junction checks) is consistent with
+    // the environment's short/long spellings.
+    #[cfg(windows)]
+    let target = crate::state::dos_path(&target);
     if !target.is_dir() {
         bail!("{} is not a directory", target.display());
     }
@@ -30,6 +34,8 @@ pub fn fork(args: ForkArgs) -> Result<()> {
             // canonicalize() both sides: on Windows it emits a `\\?\` extended
             // prefix that would otherwise break prefix comparison.
             let home = home.canonicalize().unwrap_or(home);
+            #[cfg(windows)]
+            let home = crate::state::dos_path(&home);
             if !target.starts_with(&home) {
                 bail!(
                     "refusing to isolate {}: only directories under $HOME are supported\n\

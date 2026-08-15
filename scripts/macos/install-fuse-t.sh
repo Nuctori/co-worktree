@@ -3,10 +3,16 @@
 # Rust build: fuser's build.rs probes `pkg-config fuse` on macOS, and the
 # linker needs a `libfuse.dylib`.
 #
-# Usage:  sudo bash scripts/macos/install-fuse-t.sh
-# (brew itself needs no sudo, but writing /usr/local on newer macOS does.)
+# Usage:  bash scripts/macos/install-fuse-t.sh
+# Run as the normal user (Homebrew refuses to run as root); privileged
+# filesystem writes inside use sudo.
 
 set -euo pipefail
+
+if [ "$(id -u)" -eq 0 ]; then
+    echo "error: do not run as root (Homebrew refuses); run as the normal user" >&2
+    exit 1
+fi
 
 echo "==> installing FUSE-T via Homebrew"
 brew install macos-fuse-t/homebrew-cask/fuse-t
@@ -36,14 +42,14 @@ fi
 echo "    dylib: $FUSE_T_DYLIB"
 
 if [ ! -e /usr/local/lib/libfuse.dylib ]; then
-    ln -s "$FUSE_T_DYLIB" /usr/local/lib/libfuse.dylib
+    sudo ln -s "$FUSE_T_DYLIB" /usr/local/lib/libfuse.dylib
     echo "    linked /usr/local/lib/libfuse.dylib"
 fi
 
 echo "==> ensuring pkg-config metadata (fuser build.rs probes 'fuse')"
-mkdir -p /usr/local/lib/pkgconfig
+sudo mkdir -p /usr/local/lib/pkgconfig
 if [ ! -f /usr/local/lib/pkgconfig/fuse.pc ]; then
-    cat > /usr/local/lib/pkgconfig/fuse.pc <<'EOF'
+    sudo tee /usr/local/lib/pkgconfig/fuse.pc > /dev/null <<'EOF'
 prefix=/usr/local
 libdir=/usr/local/lib
 includedir=/usr/local/include

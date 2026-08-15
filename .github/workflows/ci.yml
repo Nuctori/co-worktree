@@ -52,7 +52,7 @@ jobs:
       # the crate does not compile at all, so install it before building.
       - name: Install FUSE-T (macOS build dependency)
         if: runner.os == 'macOS'
-        run: sudo bash scripts/macos/install-fuse-t.sh
+        run: bash scripts/macos/install-fuse-t.sh
       - run: cargo test --workspace -- --nocapture
 
   e2e:
@@ -84,7 +84,7 @@ jobs:
         run: choco install winfsp -y
       - name: Install FUSE-T (macOS)
         if: runner.os == 'macOS'
-        run: sudo bash scripts/macos/install-fuse-t.sh
+        run: bash scripts/macos/install-fuse-t.sh
       - name: Run E2E acceptance suite
         shell: bash
         run: |

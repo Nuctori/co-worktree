@@ -193,6 +193,18 @@ pub fn home_dir() -> Option<PathBuf> {
     })
 }
 
+/// Strip the `\\?\` verbatim prefix. `std::fs::canonicalize` on Windows
+/// returns extended-length paths; mixing those with 8.3 short names from the
+/// environment (TMP etc.) breaks rename/access consistency.
+#[cfg(windows)]
+pub fn dos_path(p: &Path) -> PathBuf {
+    let s = p.to_string_lossy();
+    match s.strip_prefix(r"\\?\") {
+        Some(rest) => PathBuf::from(rest),
+        None => p.to_path_buf(),
+    }
+}
+
 /// Platform default state dir below `home`.
 #[cfg(not(windows))]
 fn default_state_dir(home: &Path) -> PathBuf {
