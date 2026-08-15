@@ -145,6 +145,7 @@ impl FuseOverlayfs {
         pidfile: &Path,
     ) -> Result<(i32, String)> {
         let status = Command::new("mount")
+            .arg("-t")
             .arg("overlay")
             .arg("overlay")
             .arg("-o")

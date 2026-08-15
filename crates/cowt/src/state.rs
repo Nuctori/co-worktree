@@ -263,10 +263,6 @@ pub fn valid_id_or_name(s: &str) -> bool {
 /// Atomic file write: temp file + rename (same filesystem). A kill -9
 /// mid-write leaves the old file intact instead of a truncated JSON that
 /// would brick the worktree (drop included).
-
-/// Atomic file write: temp file + rename (same filesystem). A kill -9
-/// mid-write leaves the old file intact instead of a truncated JSON that
-/// would brick the worktree (drop included).
 fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     let tmp = path.with_extension("json.tmp");
     std::fs::write(&tmp, bytes)?;
