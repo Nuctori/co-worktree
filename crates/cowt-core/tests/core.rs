@@ -1569,7 +1569,6 @@ fn symlink_manifest_round_trip() {
     );
 
     // A whiteout deleting a symlink folds the symlink out.
-    write(&base, "s", "irrelevant"); // placeholder not needed; symlink below
     std::os::unix::fs::symlink("t", base.join("s")).unwrap();
     let bm = Manifest::scan(&base).unwrap().manifest;
     assert_eq!(bm.get(Path::new("s")).unwrap().kind, EntryKind::Symlink);

@@ -536,6 +536,7 @@ impl Filesystem for CowFs {
         parent: u64,
         name: &OsStr,
         mode: u32,
+        _umask: u32,
         _rdev: u32,
         reply: ReplyEntry,
     ) {
