@@ -65,10 +65,10 @@ jobs:
           # Root => kernel overlayfs backend (native performance).
           - os: ubuntu-latest
             sudo: true
-          # Root => macOS FUSE-T backend (kext-less FUSE; macFUSE kexts and
-          # the kernel union mount are both unavailable on current images).
+          # FUSE-T is a kext-less, *unprivileged* NFS-based FUSE: no sudo
+          # needed (and root runs it worse, see probe failures as root).
           - os: macos-latest
-            sudo: true
+            sudo: false
           # Admin runner => WinFsp kernel driver via choco.
           - os: windows-latest
             sudo: false

@@ -713,29 +713,39 @@ fn mount_cow(
         MountOption::DefaultPermissions,
     ];
     // FUSE-T mounts over NFS, which is asynchronous: Session::new returns
-    // before the mount is actually reachable. Poll until the mountpoint's
-    // st_dev changes (a mounted volume has a different device id).
-    let dev_before = fs::metadata(mountpoint)
-        .map(|m| m.dev())
-        .unwrap_or(u64::MAX);
+    // before the mount is actually reachable. Poll `mount` output until the
+    // mountpoint shows up.
     let session = Session::new(fs, mountpoint, &options)
         .with_context(|| format!("mount FUSE-T filesystem at {}", mountpoint.display()))?;
     let background = BackgroundSession::new(session).context("start FUSE-T session")?;
     let deadline = std::time::Instant::now() + Duration::from_secs(20);
     loop {
-        let dev = fs::metadata(mountpoint).map(|m| m.dev()).unwrap_or(0);
-        if dev != dev_before && dev != 0 {
+        if is_mounted_now(mountpoint) {
             break;
         }
         if std::time::Instant::now() > deadline {
+            let mounts = std::process::Command::new("mount")
+                .output()
+                .map(|o| String::from_utf8_lossy(&o.stdout).into_owned())
+                .unwrap_or_default();
             bail!(
-                "FUSE-T mount at {} never became reachable",
+                "FUSE-T mount at {} never became reachable; current mounts:\n{mounts}",
                 mountpoint.display()
             );
         }
         std::thread::sleep(Duration::from_millis(100));
     }
     Ok(background)
+}
+
+/// Is `mountpoint` listed by `mount` right now?
+fn is_mounted_now(mountpoint: &Path) -> bool {
+    std::process::Command::new("mount")
+        .output()
+        .map(|o| {
+            String::from_utf8_lossy(&o.stdout).contains(&format!(" on {} ", mountpoint.display()))
+        })
+        .unwrap_or(false)
 }
 
 impl Backend for FuseT {
