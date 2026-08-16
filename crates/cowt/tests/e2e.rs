@@ -1501,6 +1501,48 @@ fn e2e_wh_prefix_create_refused() {
     env.cowt_ok(&["drop", &id]);
 }
 
+/// Round-40 review: rename is a create path too — `mv x .wh.foo` would
+/// seed user data into the deletion-marker namespace (apply deletes the
+/// host file the user never touched) or into the copy-tmp namespace
+/// (silently invisible to diff). The rename target must be refused like a
+/// create.
+#[cfg(windows)]
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_wh_prefix_rename_refused() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let (app, id) = seeded_app(&env);
+    let mut sleeper = spawn_sleeper(&env, &id, 6);
+    fs::write(app.join("victim.txt"), "data").unwrap();
+    // Renaming onto a `.wh.`-prefixed name through the view must fail.
+    let r = fs::rename(app.join("victim.txt"), app.join(".wh.victim.txt"));
+    assert!(r.is_err(), ".wh.* rename target must be refused, got Ok");
+    // Renaming onto the copy-tmp namespace must fail too.
+    let r = fs::rename(
+        app.join("victim.txt"),
+        app.join(".cowt-copy-tmp.victim.txt"),
+    );
+    assert!(
+        r.is_err(),
+        ".cowt-copy-tmp.* rename target must be refused, got Ok"
+    );
+    // The source survives and ordinary renames still work.
+    assert_eq!(fs::read_to_string(app.join("victim.txt")).unwrap(), "data");
+    fs::rename(app.join("victim.txt"), app.join("moved.txt")).unwrap();
+    wait_run(&mut sleeper);
+    assert_mount_gone(&app);
+    env.cowt_ok(&["apply", &id]);
+    assert_eq!(fs::read_to_string(app.join("moved.txt")).unwrap(), "data");
+    assert!(
+        !app.join(".wh.victim.txt").exists(),
+        "refused rename target must never land on the host"
+    );
+    env.cowt_ok(&["drop", &id]);
+}
+
 /// Adversarial: a symlink/junction ring planted in the upper layer (any
 /// process can create one during `cowt run`) must not make diff/apply walk
 /// an external tree or crash (stack overflow — reproduced pre-fix).

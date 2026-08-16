@@ -137,11 +137,7 @@ impl Drop for ChildSignalGuard {
 pub(crate) fn kill_child_process_group(pid: u32, expected_start: Option<u128>) {
     #[cfg(target_os = "linux")]
     {
-        let reused = match (expected_start, process_starttime(pid)) {
-            (Some(exp), Some(cur)) => cur != exp,
-            _ => false,
-        };
-        if reused {
+        if group_kill_should_skip(expected_start, process_starttime(pid)) {
             eprintln!(
                 "cowt: warning: pid {pid} was recycled after the child exited; \
                  skipping the group kill"
@@ -151,6 +147,19 @@ pub(crate) fn kill_child_process_group(pid: u32, expected_start: Option<u128>) {
     }
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
+    }
+}
+
+/// Pure decision for the group-kill pid-reuse guard (round-40 review):
+/// skip only when the pid is ALIVE with a DIFFERENT starttime than the one
+/// captured before wait() — the number belongs to someone else. ENOENT
+/// (pid free) or a matching starttime means the group is ours (or gone:
+/// ESRCH, harmless) — kill.
+#[cfg(target_os = "linux")]
+fn group_kill_should_skip(expected_start: Option<u128>, current: Option<u128>) -> bool {
+    match (expected_start, current) {
+        (Some(exp), Some(cur)) => cur != exp,
+        _ => false,
     }
 }
 /// A virtual filesystem backend: mounts a merged view whose writes are
@@ -762,6 +771,51 @@ mod pidfile_tests {
         assert_eq!(
             std::fs::read_to_string(&pf).unwrap(),
             std::process::id().to_string()
+        );
+    }
+}
+
+/// Round-40 review: regression locks for the group-kill pid-reuse guard
+/// (the zombie-state check it replaced was dead code that passed all
+/// tests — this class of failure needs direct locks).
+#[cfg(all(test, target_os = "linux"))]
+mod group_kill_tests {
+    use super::*;
+
+    #[test]
+    fn should_skip_only_on_starttime_mismatch() {
+        assert!(group_kill_should_skip(Some(1), Some(2)));
+        assert!(!group_kill_should_skip(Some(1), Some(1)));
+        assert!(!group_kill_should_skip(Some(1), None), "ENOENT -> kill");
+        assert!(!group_kill_should_skip(None, Some(1)));
+        assert!(!group_kill_should_skip(None, None));
+    }
+
+    /// Integration: a live process whose starttime differs from the
+    /// expectation must SURVIVE the guard (recycled-pid simulation);
+    /// the matching-starttime call must kill its group.
+    #[test]
+    fn group_kill_respects_starttime_identity() {
+        use std::os::unix::process::CommandExt;
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .process_group(0) // makes it a group leader, like the runner's child
+            .spawn()
+            .unwrap();
+        let pid = child.id();
+        let real = process_starttime(pid).expect("starttime readable");
+        // Mismatched expectation: recycled pid — the kill must be skipped.
+        kill_child_process_group(pid, Some(real + 1));
+        assert!(
+            crate::state::pid_alive(pid),
+            "starttime mismatch must skip the group kill"
+        );
+        // Matching expectation: the group is ours — the kill must land.
+        kill_child_process_group(pid, Some(real));
+        let _ = child.wait();
+        assert!(
+            !crate::state::pid_alive(pid),
+            "matching starttime must kill the group"
         );
     }
 }

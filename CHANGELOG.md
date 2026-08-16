@@ -499,11 +499,13 @@ All notable changes to co-worktree are documented here.
   happens if the pidfile still holds the exact content judged stale — a
   concurrent runner's LIVE pidfile written between judge and remove is no
   longer deleted (that left the winner unowned).
-- `kill_child_process_group` (Linux) verifies the pid is still our zombie
-  (state 'Z' in /proc) before killing the group — after `wait()` reaps the
-  child, the pid/pgid could have been recycled and the kill would hit
-  innocent processes. If the pid is gone or reused, the group kill is
-  skipped with a warning.
+- `kill_child_process_group` no longer kills a recycled group: the child's
+  starttime is captured before `wait()`; if the pid is alive with a
+  DIFFERENT starttime after the wait (number reused by a new group
+  leader), the group kill is skipped with a warning. ENOENT or matching
+  starttime: the group is ours (or gone) — kill as before. (The initial
+  zombie-state check ran after `wait()` — which reaps — and made the kill
+  dead code; fixed in the follow-up review.)
 - `sweep_stale_staging` requires the `.cowt-staging` marker (written by
   merge::execute) before deleting: a user directory in user-owned space
   that merely matches the `.cowt-apply-<deadpid>-*` name pattern is never
