@@ -124,30 +124,27 @@ impl Drop for ChildSignalGuard {
 /// (e.g. backgrounded processes holding the mount cwd), which would
 /// otherwise make the unmount fail with EBUSY and deadlock drop --force
 /// (round-26).
+///
+/// `expected_start` is the child's starttime captured BEFORE `wait()`:
+/// after wait() reaps the child its pid is free, and if the number was
+/// recycled by a new process group leader the kill would hit innocents.
+/// A starttime mismatch means the pid belongs to someone else — skip.
+/// ENOENT (pid free at check time) or a matching starttime: the group is
+/// either gone (ESRCH, harmless) or still holds OUR grandchildren — kill
+/// (round-40 review: the previous zombie-state check ran after wait() and
+/// made the kill dead code on Linux).
 #[cfg(unix)]
-pub(crate) fn kill_child_process_group(pid: u32) {
-    // Round-40 review: `child.wait()` reaps the child BEFORE this runs;
-    // between the reap and the kill the pid (and thus the pgid) could be
-    // recycled by a NEW group leader — killing it would hit innocent
-    // processes. On Linux the zombie keeps the pid allocated: if the pid
-    // is still our zombie (state 'Z'), the group cannot have been
-    // recycled. If it is gone or reused, skip the kill (any surviving
-    // grandchildren just make the unmount fail with EBUSY and warn).
+pub(crate) fn kill_child_process_group(pid: u32, expected_start: Option<u128>) {
     #[cfg(target_os = "linux")]
     {
-        let still_ours = std::fs::read_to_string(format!("/proc/{pid}/stat"))
-            .ok()
-            .and_then(|s| {
-                let after_comm = s.rfind(')')?;
-                s[after_comm + 1..]
-                    .split_whitespace()
-                    .next()
-                    .map(|st| st == "Z")
-            })
-            .unwrap_or(false);
-        if !still_ours {
+        let reused = match (expected_start, process_starttime(pid)) {
+            (Some(exp), Some(cur)) => cur != exp,
+            _ => false,
+        };
+        if reused {
             eprintln!(
-                "cowt: warning: child group {pid} already reaped/recycled; skipping group kill"
+                "cowt: warning: pid {pid} was recycled after the child exited; \
+                 skipping the group kill"
             );
             return;
         }
@@ -240,12 +237,16 @@ pub trait Backend: Send + Sync {
         // Forward SIGTERM/SIGINT to the child so killing `cowt run` never
         // orphans it (round-26). Cleared when the guard drops below.
         let _sig = ChildSignalGuard::track(child.id());
+        // Capture BEFORE wait(): after wait() reaps the child, the pid is
+        // free and starttime is the only way to detect reuse (round-40).
+        #[cfg(unix)]
+        let child_start = process_starttime(child.id());
         let result = child.wait();
         // Reap stray grandchildren (backgrounded processes that kept the
         // view's cwd / open files) before unmounting — otherwise the unmount
         // fails with EBUSY and drop --force deadlocks (round-26).
         #[cfg(unix)]
-        kill_child_process_group(child.id());
+        kill_child_process_group(child.id(), child_start);
         // Kernel overlayfs renames a lower directory lazily: upper/ holds the
         // renamed dir but its children stay un-materialized (resolved through
         // lower while mounted). Materialize them while the view is still

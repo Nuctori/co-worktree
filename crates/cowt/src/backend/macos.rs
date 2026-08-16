@@ -666,6 +666,12 @@ impl Filesystem for CowFs {
         ) else {
             return reply.error(libc::ENOENT);
         };
+        // Round-40 review: rename is a create path too — `mv x .wh.foo`
+        // would seed user data into the whiteout namespace (deleted as a
+        // marker at apply) or into the copy-tmp namespace (invisible).
+        if is_reserved_name(newname) {
+            return reply.error(libc::EPERM);
+        }
         let lower_has = fs::symlink_metadata(self.lower_of(&src)).is_ok();
         let src_up = self.upper_of(&src);
         if lower_has && fs::symlink_metadata(&src_up).is_err() {

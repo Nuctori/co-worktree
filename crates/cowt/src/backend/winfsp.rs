@@ -984,6 +984,18 @@ impl FileSystemContext for CowFs {
     ) -> FspResult<()> {
         let src = rel_of(file_name);
         let dst = rel_of(new_file_name);
+        // Round-40 review: rename is a create path too — renaming a file
+        // to a `.wh.*` name would seed user data into the whiteout
+        // namespace (deleted as a marker at apply) or into the copy-tmp
+        // namespace (invisible to diff). Same guard as create.
+        if dst
+            .file_name()
+            .and_then(|n| n.to_str())
+            .map(|n| n.starts_with(WHITEOUT_PREFIX) || n.starts_with(".cowt-copy-tmp."))
+            .unwrap_or(false)
+        {
+            return Err(FspError::IO(ErrorKind::PermissionDenied));
+        }
         let lower_has = fs::symlink_metadata(self.lower_of(&src)).is_ok();
         let src_up = self.upper_of(&src);
         if lower_has && fs::symlink_metadata(&src_up).is_err() {

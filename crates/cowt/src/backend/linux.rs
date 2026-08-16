@@ -213,9 +213,10 @@ impl FuseOverlayfs {
             }
         }
         let _sig = super::ChildSignalGuard::track(child.id());
+        let child_start = super::process_starttime(child.id());
         let result = child.wait();
         // Reap stray grandchildren before unmount (round-26).
-        super::kill_child_process_group(child.id());
+        super::kill_child_process_group(child.id(), child_start);
         // Lazy copy-up: a renamed lower dir has no materialized children in
         // upper; copy them from the still-mounted view so the offline scan
         // (diff/apply) matches what the program saw (else apply drops them).
@@ -334,9 +335,10 @@ impl FuseOverlayfs {
             }
         }
         let _sig = super::ChildSignalGuard::track(child.id());
+        let child_start = super::process_starttime(child.id());
         let result = child.wait();
         // Reap stray grandchildren before unmount (round-26).
-        super::kill_child_process_group(child.id());
+        super::kill_child_process_group(child.id(), child_start);
         // Always unmount, whatever the child did (including crashes).
         match self.unmount(mountpoint) {
             Ok(()) => guard.disarm(),

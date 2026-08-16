@@ -167,7 +167,9 @@ Windows cross-compile check, release builds for all three.
 - **macOS case-sensitive APFS**: whiteout shadowing matches
   case-insensitively (safe default for the common case-insensitive APFS),
   so deleting `Foo.txt` on a case-sensitive volume also hides a distinct
-  lower `foo.txt`.
+  lower `foo.txt`. Case folding is assumed at COMPILE time on macOS (like
+  NTFS) rather than probed at runtime; on case-sensitive volumes the apply
+  fold-collision pre-check may over-refuse.
 - **JSON paths use native separators** (`\` on Windows, `/` elsewhere);
   scripts parsing `diff --json` / `apply --dry-run --json` should normalize.
 
