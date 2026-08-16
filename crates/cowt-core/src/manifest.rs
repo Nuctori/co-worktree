@@ -421,6 +421,57 @@ impl Manifest {
     }
 }
 
+/// Keys of `entries` that collide after case folding — two paths differing
+/// by case alone are physically one file on NTFS/default APFS (round-38-04:
+/// a Linux-created manifest read by a Windows cowt). Returns the colliding
+/// keys; the caller refuses with a cross-platform explanation.
+pub fn case_fold_collision_keys(entries: &BTreeMap<PathBuf, Entry>) -> Vec<PathBuf> {
+    let mut seen: std::collections::BTreeMap<String, PathBuf> = Default::default();
+    let mut collisions: Vec<PathBuf> = Vec::new();
+    for p in entries.keys() {
+        let folded = p.to_string_lossy().to_lowercase();
+        if let Some(other) = seen.insert(folded, p.clone()) {
+            collisions.push(other);
+            collisions.push(p.clone());
+        }
+    }
+    collisions.sort();
+    collisions.dedup();
+    collisions
+}
+
+/// Windows reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9 — any
+/// extension variant) and trailing-dot/space components. NTFS cannot
+/// express them through normal APIs, so a cross-platform manifest
+/// containing them is inapplicable on Windows; Win32 path normalization
+/// additionally strips trailing dots/spaces, silently collapsing distinct
+/// keys (round-38-05).
+pub fn windows_inexpressible_keys(entries: &BTreeMap<PathBuf, Entry>) -> Vec<PathBuf> {
+    fn reserved(component: &str) -> bool {
+        // The reserved name is the part before the first dot.
+        let base = component.split('.').next().unwrap_or("");
+        let b = base.to_ascii_uppercase();
+        b == "CON"
+            || b == "PRN"
+            || b == "AUX"
+            || b == "NUL"
+            || ((b.starts_with("COM") || b.starts_with("LPT"))
+                && b.len() == 4
+                && b.as_bytes()[3].is_ascii_digit()
+                && b.as_bytes()[3] != b'0')
+    }
+    entries
+        .keys()
+        .filter(|p| {
+            p.components().any(|c| {
+                let s = c.as_os_str().to_string_lossy();
+                reserved(&s) || s.ends_with('.') || s.ends_with(' ') || s.is_empty()
+            })
+        })
+        .cloned()
+        .collect()
+}
+
 /// Hash every file in `to_hash` using a fixed pool of worker threads.
 fn hash_files(
     base: &Path,

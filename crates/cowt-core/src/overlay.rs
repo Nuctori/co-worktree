@@ -27,6 +27,15 @@ const COPY_TMP_PREFIX: &str = ".cowt-copy-tmp.";
 ///
 /// `upper` must be the overlayfs upper directory (not the merged view).
 pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
+    effective_manifest_fold(base, upper, false)
+}
+
+/// Like [`effective_manifest`], but folds case-insensitive filesystems
+/// (NTFS/APFS default): a whiteout whose victim differs from the base key
+/// by case alone (host case-rename then delete, round-38-03) still shadows
+/// the base entry. Byte-exact matching would report a phantom "no
+/// changes" diff and trip the round-23 corruption guard on apply.
+pub fn effective_manifest_fold(base: &Manifest, upper: &Path, case_fold: bool) -> Result<Manifest> {
     let mut entries: BTreeMap<PathBuf, Entry> = base.entries.clone();
 
     // A missing upper layer (kill -9 between apply's remove_dir_all and
@@ -93,10 +102,20 @@ pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
             // A whiteout shadows the path itself or any ancestor (dir
             // whiteout covers the whole subtree). Walk the ancestor chain:
             // O(depth · log m) per entry instead of O(m) via .any()
-            // (round-32).
+            // (round-32). With case_fold (round-38-03), the victim name is
+            // compared case-insensitively: the winfsp delete path writes
+            // whiteouts using the HOST's actual spelling, which may differ
+            // from the base key by case alone after a host-side rename.
             let mut cur = Some(p.as_path());
             while let Some(c) = cur {
-                if prefixes.contains(c) {
+                let hit = if case_fold {
+                    prefixes.iter().any(|pfx| {
+                        pfx.to_string_lossy().to_lowercase() == c.to_string_lossy().to_lowercase()
+                    })
+                } else {
+                    prefixes.contains(c)
+                };
+                if hit {
                     return false;
                 }
                 cur = c.parent().filter(|_| !c.as_os_str().is_empty());

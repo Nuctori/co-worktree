@@ -238,7 +238,9 @@ impl State {
     pub fn load_manifest(dir: &Path) -> Result<Manifest> {
         let s = fs::read_to_string(dir.join("manifest.json"))
             .with_context(|| format!("read {}", dir.display()))?;
-        Manifest::from_json(&s).context("parse manifest.json")
+        let m = Manifest::from_json(&s).context("parse manifest.json")?;
+        validate_manifest_for_host(&m)?;
+        Ok(m)
     }
 
     /// Atomically replace the base manifest (apply advances the baseline to
@@ -502,6 +504,53 @@ pub fn sweep_stale_staging(parent: &std::path::Path) {
             let _ = std::fs::remove_dir_all(e.path());
         }
     }
+}
+
+/// Whether the host filesystem resolves names case-insensitively (NTFS,
+/// default APFS). Drives case folding in manifest folding and apply's
+/// collision pre-check (round-38).
+pub fn case_fold_host() -> bool {
+    cfg!(any(windows, target_os = "macos"))
+}
+
+/// Host-side manifest validation (round-38-04/05): on a case-insensitive
+/// host, two keys differing by case alone are physically one file — a
+/// cross-platform manifest (R34 contract) expressing both must be refused
+/// loudly instead of silently dropping one during apply. On Windows,
+/// reserved names (CON/NUL/...) and trailing-dot/space components are
+/// inexpressible or silently collapsed by Win32.
+pub fn validate_manifest_for_host(m: &Manifest) -> Result<()> {
+    if case_fold_host() {
+        let coll = cowt_core::manifest::case_fold_collision_keys(&m.entries);
+        if !coll.is_empty() {
+            bail!(
+                "manifest contains path(s) that collide by case alone on this \
+                 filesystem: {}; the worktree was created on a case-sensitive \
+                 system (Linux?) and cannot be applied here. Rename one side on \
+                 the originating system and re-apply",
+                coll.iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    #[cfg(windows)]
+    {
+        let bad = cowt_core::manifest::windows_inexpressible_keys(&m.entries);
+        if !bad.is_empty() {
+            bail!(
+                "manifest contains Windows-reserved or trailing-dot/space \
+                 name(s): {}; these cannot be created on NTFS. Rename them on \
+                 the originating system and re-apply",
+                bad.iter()
+                    .map(|p| p.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
+    Ok(())
 }
 
 /// Generate a short random id (16 hex chars = 64 bits) from /dev/urandom,

@@ -76,7 +76,28 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
             );
         }
     }
-    let work = overlay::effective_manifest(&base, &upper)?;
+    let work = overlay::effective_manifest_fold(&base, &upper, crate::state::case_fold_host())?;
+
+    // Round-38-02: on a case-insensitive host, a worktree-added path that
+    // differs from an existing base/host path by case alone is physically
+    // the same file — the byte-exact plan would emit a WriteFile that
+    // Windows verify_unchanged then misreports as a TOCTOU "appeared on
+    // the host", a permanent deadlock. Refuse with an explicit conflict
+    // instead.
+    if crate::state::case_fold_host() {
+        let coll = merge::case_fold_conflicts(&base, &work, &current);
+        if !coll.is_empty() {
+            bail!(
+                "cannot apply on this case-insensitive filesystem: the worktree \
+                 contains path(s) that collide with existing files by case alone: {}; \
+                 rename one side (in the worktree view or on the host) and re-apply",
+                coll.iter()
+                    .map(|p| crate::state::sanitize_display(&p.display().to_string()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            );
+        }
+    }
 
     let plan = merge::plan(&base, &current, &work, &upper);
 

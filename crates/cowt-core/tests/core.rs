@@ -2027,3 +2027,112 @@ fn copy_tmp_residue_is_invisible_to_effective_manifest() {
         );
     }
 }
+
+/// Round-38-03: with case folding (NTFS/APFS), a whiteout whose victim
+/// differs from the base key by case alone (host case-rename then delete)
+/// must still shadow the base entry — byte-exact matching produced a
+/// phantom "no changes" diff and tripped the apply corruption guard.
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn whiteout_victim_case_fold_shadows_base() {
+    let tmp = TempDir::new().unwrap();
+    let base_dir = tmp.path().join("base");
+    let upper = tmp.path().join("upper");
+    fs::create_dir_all(&base_dir).unwrap();
+    fs::create_dir_all(&upper).unwrap();
+    write(&base_dir, "Cache.bin", "data");
+    // The winfsp delete path writes whiteouts with the HOST's actual
+    // spelling: `.wh.cache.bin` after a host-side case rename.
+    fs::write(upper.join(".wh.cache.bin"), b"").unwrap();
+
+    let base = scan(&base_dir);
+    let eff = overlay::effective_manifest_fold(&base, &upper, true).unwrap();
+    assert!(
+        !eff.entries.contains_key(Path::new("Cache.bin")),
+        "case-fold whiteout must shadow the base entry"
+    );
+    // Without folding, the entry survives (Linux semantics: distinct files).
+    let eff_exact = overlay::effective_manifest_fold(&base, &upper, false).unwrap();
+    assert!(eff_exact.entries.contains_key(Path::new("Cache.bin")));
+}
+
+/// Round-38-02: a worktree-added path colliding with a base path by case
+/// alone must be reported as a case-fold conflict on case-insensitive
+/// hosts — the byte-exact plan would deadlock in Windows verify_unchanged.
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn case_fold_conflicts_detects_case_variant_add() {
+    let tmp = TempDir::new().unwrap();
+    let base_dir = tmp.path().join("base");
+    let work_dir = tmp.path().join("work");
+    let host = tmp.path().join("host");
+    for d in [&base_dir, &work_dir, &host] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base_dir, "Foo.txt", "base");
+    write(&work_dir, "Foo.txt", "base");
+    write(&work_dir, "foo.txt", "worktree-added");
+    write(&host, "Foo.txt", "base");
+
+    let base = scan(&base_dir);
+    let work = scan(&work_dir);
+    let current = scan(&host);
+    let coll = merge::case_fold_conflicts(&base, &work, &current);
+    assert!(
+        coll.iter().any(|p| p == Path::new("foo.txt")),
+        "foo.txt must be reported as a case-fold conflict: {:?}",
+        coll
+    );
+    // Case-identical keys are NOT conflicts.
+    let coll2 = merge::case_fold_conflicts(&base, &scan(&base_dir), &current);
+    assert!(
+        coll2.is_empty(),
+        "no conflicts for identical keys: {coll2:?}"
+    );
+}
+
+/// Round-38-04: manifest keys colliding by case alone are detected by the
+/// pure helper (a Linux manifest read by a Windows cowt must refuse, not
+/// silently drop one key during apply).
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn case_fold_collision_keys_detected() {
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    fs::create_dir_all(&d).unwrap();
+    write(&d, "A/a.txt", "x");
+    write(&d, "a/A.txt", "y");
+    let m = scan(&d);
+    let coll = cowt_core::manifest::case_fold_collision_keys(&m.entries);
+    assert_eq!(
+        coll.len(),
+        2,
+        "both colliding keys must be reported: {coll:?}"
+    );
+}
+
+/// Round-38-05: Windows-reserved names and trailing-dot components are
+/// detected by the pure helper (inapplicable on NTFS).
+#[test]
+#[cfg(all(unix, not(target_os = "macos")))]
+fn windows_inexpressible_keys_detected() {
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    fs::create_dir_all(&d).unwrap();
+    write(&d, "CON.txt", "x");
+    write(&d, "aux.log", "y");
+    write(&d, "lpt1.dat", "z");
+    write(&d, "trailing.", "t");
+    write(&d, "ok.txt", "fine");
+    let m = scan(&d);
+    let bad = cowt_core::manifest::windows_inexpressible_keys(&m.entries);
+    assert!(
+        bad.iter()
+            .any(|p| p == Path::new("CON.txt") && bad.iter().any(|p| p == Path::new("trailing."))),
+        "reserved + trailing-dot keys must be reported: {bad:?}"
+    );
+    assert!(
+        !bad.iter().any(|p| p == Path::new("ok.txt")),
+        "normal names must pass: {bad:?}"
+    );
+}

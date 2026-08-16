@@ -416,6 +416,30 @@ All notable changes to co-worktree are documented here.
   diff/missing-target, doctor damage+residue reporting, missing-upper
   display, empty COWT_HOME.
 
+### Added — round 38 (case-insensitive filesystems)
+
+- winfsp/macOS merged view: an upper entry now shadows a lower entry that
+  differs by case alone (NTFS/APFS resolve names case-insensitively). The
+  view previously exposed both spellings and a reopen could resolve to the
+  wrong copy — copy_up then silently replaced the worktree's file with
+  base content (data loss).
+- Case-fold whiteout matching (`effective_manifest_fold`): a host-side
+  case rename followed by a worktree delete produced a phantom "no
+  changes" diff and tripped the round-23 corruption guard on apply. With
+  folding (NTFS/APFS hosts) the deletion is now seen and applied.
+- apply refuses case-fold collisions up front: a worktree-added `foo.txt`
+  next to a base `Foo.txt` is one physical file on NTFS; the old path
+  planned a WriteFile that Windows verify_unchanged misreported as a TOCTOU
+  "appeared on the host" — a permanent, wrongly diagnosed deadlock.
+- Cross-platform manifests (R34 contract): loading a manifest whose keys
+  collide by case alone on this host now fails with an explicit
+  "created on a case-sensitive system" message instead of silently
+  dropping one key during apply; Windows additionally rejects
+  reserved-name (CON/NUL/PRN/AUX/COM1-9/LPT1-9) and trailing-dot/space
+  entries that NTFS cannot express (or silently collapses).
+- Regression locks (Linux CI): whiteout case-fold shadow, case-fold
+  conflict detection, collision-key and reserved-name detectors.
+
 ### Known limitations
 
 - Crash windows with manual-only recovery (round-36, not auto-healed):

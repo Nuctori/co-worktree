@@ -336,6 +336,40 @@ pub fn execute(plan_result: &MergePlan, target_root: &Path) -> Result<ApplyRepor
     result
 }
 
+/// Case-fold collisions in `work` against `base`/`current`, for
+/// case-insensitive hosts (NTFS, default APFS): a worktree-added `foo.txt`
+/// next to a base `Foo.txt` is physically ONE file there. The byte-exact
+/// plan would emit a WriteFile whose Windows verify_unchanged then
+/// misreports a TOCTOU "path appeared on the host" — a permanent, wrongly
+/// diagnosed apply deadlock (round-38-02). Returns the colliding work
+/// paths; the caller refuses with an explicit message instead of planning.
+pub fn case_fold_conflicts(base: &Manifest, work: &Manifest, current: &Manifest) -> Vec<PathBuf> {
+    let mut seen: std::collections::BTreeMap<String, PathBuf> = Default::default();
+    let mut conflicts: Vec<PathBuf> = Vec::new();
+    for p in work.entries.keys() {
+        let folded = p.to_string_lossy().to_lowercase();
+        // Collision within work itself (two keys differing by case only —
+        // a cross-platform manifest, round-38-04).
+        if let Some(other) = seen.insert(folded.clone(), p.clone()) {
+            conflicts.push(other);
+            conflicts.push(p.clone());
+            continue;
+        }
+        for bp in base.entries.keys().chain(current.entries.keys()) {
+            if bp == p {
+                continue;
+            }
+            if bp.to_string_lossy().to_lowercase() == folded {
+                conflicts.push(p.clone());
+                break;
+            }
+        }
+    }
+    conflicts.sort();
+    conflicts.dedup();
+    conflicts
+}
+
 fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result<ApplyReport> {
     let mut report = ApplyReport {
         kept: plan.kept.len(),

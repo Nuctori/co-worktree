@@ -181,7 +181,16 @@ impl CowFs {
         if let Ok(rd) = fs::read_dir(self.lower_of(rel)) {
             for e in rd.flatten() {
                 let name = e.file_name();
-                if names.iter().any(|n| *n == name) {
+                // APFS (default) resolves names case-insensitively: an
+                // upper `foo.txt` shadows a lower `Foo.txt`, or a reopen
+                // could resolve to the wrong copy and copy_up would
+                // silently overwrite the worktree's file (round-38-01,
+                // mirrors the winfsp fix).
+                let folded = name.to_string_lossy().to_lowercase();
+                if names
+                    .iter()
+                    .any(|n| n.to_string_lossy().to_lowercase() == folded)
+                {
                     continue; // shadowed by an upper entry
                 }
                 if self.is_shadowed(&rel.join(&name)) {

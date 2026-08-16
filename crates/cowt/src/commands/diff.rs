@@ -45,7 +45,7 @@ pub fn diff_cmd(args: DiffArgs) -> Result<()> {
     let base = State::load_manifest(&dir)?;
     let upper = dir.join("upper");
     let started = std::time::Instant::now();
-    let work = overlay::effective_manifest(&base, &upper)?;
+    let work = overlay::effective_manifest_fold(&base, &upper, crate::state::case_fold_host())?;
     let mut changes = diff::diff(&base, &work);
 
     if args.content {
