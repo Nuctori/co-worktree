@@ -470,3 +470,22 @@ pub fn is_mounted_proc(mountpoint: &Path) -> bool {
         fields.next() == Some(target.as_str())
     })
 }
+
+/// Whether the mount at `mountpoint` is one of ours (overlayfs or
+/// fuse-overlayfs — the only filesystems cowt mounts on Linux). A foreign
+/// mount (sshfs/rclone/tmpfs...) must never be torn down by `drop --force`,
+/// even when a stale pidfile claims the worktree (round-31, D-005).
+pub fn mount_is_ours_proc(mountpoint: &Path) -> bool {
+    let target = mountpoint.to_string_lossy().replace(' ', "\\040");
+    let Ok(mounts) = std::fs::read_to_string("/proc/self/mounts") else {
+        return false;
+    };
+    mounts.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        let device = fields.next().unwrap_or("").to_string();
+        fields.next() == Some(target.as_str())
+            && (device == "overlay"
+                || device == "fuse-overlayfs"
+                || device.starts_with("fuse.overlayfs"))
+    })
+}

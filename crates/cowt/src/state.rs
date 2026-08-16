@@ -140,6 +140,7 @@ impl State {
         if !valid_id_or_name(id_or_name) {
             bail!("invalid worktree id or name '{id_or_name}'");
         }
+        let _direct = self.dir(id_or_name);
         let direct = self.dir(id_or_name);
         // A worktree-shaped directory (meta.json present, or a half-created
         // fork: manifest.json already written) resolves by id even when
@@ -150,6 +151,13 @@ impl State {
         {
             return Ok(direct);
         }
+        // An EARLIER half-created fork (kill between create_dir and the
+        // manifest write) leaves only upper/work — still a cowt dir that
+        // must be resolvable so `drop --force` can clean it up (round-31).
+        if direct.is_dir() && (direct.join("upper").is_dir() || direct.join("work").is_dir()) {
+            return Ok(direct);
+        }
+        // Try name lookup.
         // Try name lookup.
         let mut hits = Vec::new();
         for meta in self.list()? {

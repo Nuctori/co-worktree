@@ -59,7 +59,7 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
             );
         }
         eprintln!("cowt: --force: terminating pid {pid}");
-        terminate(pid);
+        terminate(pid)?;
         // Note: run.pid is cleared *after* the unmount loop below — the
         // stale_run() discriminator needs it to prove the mount is ours.
     }
@@ -82,7 +82,11 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
                 break;
             }
             let own_leftover = State::stale_run(&dir) || dir.join("real").exists();
-            if !own_leftover {
+            // The mount must ALSO be provably ours: a stale pidfile alone
+            // does not authorize tearing down a foreign filesystem mounted
+            // at the target later (D-005 boundary, round-31).
+            let ours = mount_is_ours(&meta.target);
+            if !own_leftover || !ours {
                 foreign_mount = true;
                 break;
             }
@@ -127,6 +131,33 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
     // directory: `real` is the user's actual data (macOS can strand it when
     // the mountpoint symlink was removed externally — a subsequent drop
     // would silently destroy the host directory).
+    //
+    // The check happens AFTER the trash sweep and immediately before the
+    // rename, so the sweep's (potentially slow) remove_dir_all cannot widen
+    // a check→rename TOCTOU window during which a concurrent `cowt run`
+    // could move the host dir into `real` (round-31).
+    let dir_id = dir
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_else(|| meta.id.clone());
+    if let Ok(rd) = fs::read_dir(state.root()) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            if name.starts_with(".trash-") {
+                // A trash holding a moved-aside host dir (`real`) must NOT
+                // be swept — deleting it would destroy user data (round-31).
+                if e.path().join("real").exists() {
+                    eprintln!(
+                        "cowt: warning: {} still holds a moved-aside host dir; not sweeping it",
+                        e.path().display()
+                    );
+                    continue;
+                }
+                let _ = fs::remove_dir_all(e.path());
+            }
+        }
+    }
+    // Re-check after the sweep, immediately before the rename (round-31).
     if dir.join("real").exists() {
         bail!(
             "the host directory is still moved aside at {}; refusing to delete it. \
@@ -136,21 +167,23 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
     }
     let trash = state.root().join(format!(
         ".trash-{}-{}",
-        meta.id,
+        dir_id,
         std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
-    if let Ok(rd) = fs::read_dir(state.root()) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            if name.starts_with(".trash-") {
-                let _ = fs::remove_dir_all(e.path());
-            }
-        }
-    }
     fs::rename(&dir, &trash).with_context(|| format!("rename {} aside", dir.display()))?;
+    // The host dir could have moved into `real` between the check and the
+    // rename (a concurrent run's mount window); never delete that trash.
+    if trash.join("real").exists() {
+        let _ = fs::rename(&trash, &dir); // roll back
+        bail!(
+            "the host directory moved aside into {} during drop; rolled back. \
+             Retry after the run finishes",
+            trash.join("real").display()
+        );
+    }
     let mut last_err = None;
     for _ in 0..30 {
         match fs::remove_dir_all(&trash) {
@@ -181,24 +214,55 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
     Ok(())
 }
 
+/// Whether the mount at `target` (if any) is provably one cowt created.
+/// Linux: the /proc/self/mounts device must be overlay/fuse-overlayfs (a
+/// stale pidfile alone does not authorize tearing down a foreign fs the
+/// user mounted later — D-005 boundary, round-31). Other platforms: the
+/// backend's own guards apply (macOS unmount validates the mountpoint
+/// symlink; WinFsp mounts live inside the state dir).
+#[cfg(target_os = "linux")]
+fn mount_is_ours(target: &std::path::Path) -> bool {
+    crate::backend::linux::mount_is_ours_proc(target)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn mount_is_ours(_target: &std::path::Path) -> bool {
+    true
+}
+
 #[cfg(unix)]
-fn terminate(pid: u32) {
+fn terminate(pid: u32) -> Result<()> {
     use crate::state::pid_alive;
     use std::process::Command;
     let _ = Command::new("kill").arg(pid.to_string()).status();
     // Wait briefly for SIGTERM to land, then escalate. `kill -0` probes
     // liveness on macOS too, where /proc does not exist.
+    // Wait briefly for SIGTERM to land, then escalate. `kill -0` probes
+    // liveness on macOS too, where /proc does not exist.
     for _ in 0..20 {
         if !pid_alive(pid) {
-            return;
+            return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
     let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
+    // Verify SIGKILL landed; if the process survives, the drop must NOT
+    // proceed (it would leave the mount/real in its hands and misreport
+    // the blocker — round-31).
+    for _ in 0..20 {
+        if !pid_alive(pid) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    anyhow::bail!(
+        "process {pid} survived SIGKILL (uninterruptible or protected); \
+         refusing to continue. Investigate the process, then drop again"
+    )
 }
 
 #[cfg(windows)]
-fn terminate(pid: u32) {
+fn terminate(pid: u32) -> Result<()> {
     use crate::state::pid_alive;
     use std::process::Command;
     let _ = Command::new("taskkill")
@@ -208,8 +272,12 @@ fn terminate(pid: u32) {
     // it dead, so wait for the exit.
     for _ in 0..50 {
         if !pid_alive(pid) {
-            return;
+            return Ok(());
         }
         std::thread::sleep(std::time::Duration::from_millis(100));
     }
+    anyhow::bail!(
+        "process {pid} survived taskkill /F; refusing to continue. \
+         Investigate the process, then drop again"
+    )
 }

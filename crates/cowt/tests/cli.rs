@@ -1047,3 +1047,54 @@ fn run_refuses_live_pidfile() {
         "run must clean its own pidfile"
     );
 }
+
+// ---------------------------------------------------------------- R31
+
+/// Round-31: a half-created fork dir (kill between create_dir and the
+/// manifest write — only upper/work exist) must be resolvable and
+/// cleanable by `drop --force` (was: permanent ghost — resolve said "no
+/// worktree", fork said "already exists", no cleanup path).
+#[test]
+fn drop_cleans_half_created_fork_dir() {
+    let env = Env::new();
+    // Simulate the crash window: a state dir with upper/ + work/ but no
+    // meta.json/manifest.json.
+    let ghost = env.state.join("abcdef0123456789");
+    fs::create_dir_all(ghost.join("upper")).unwrap();
+    fs::create_dir_all(ghost.join("work")).unwrap();
+
+    let id = "abcdef0123456789";
+    // resolve must find it (drop can act on it); --force is required for
+    // the degraded (no meta.json) cleanup path, like round-23.
+    let out = env.cowt().args(["drop", id, "--force"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "drop --force must clean a half-created dir: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(!ghost.exists(), "half-created fork dir must be removed");
+}
+
+/// Round-31: trash sweep must NOT delete a trash that still holds a
+/// moved-aside host dir (`real`) — that would destroy user data.
+#[test]
+fn trash_sweep_preserves_real_holding_trash() {
+    let env = Env::new();
+    env.fork();
+    // A leftover trash from a previously failed drop, holding the host dir.
+    let trash = env.state.join(".trash-deadbeef-1");
+    fs::create_dir_all(trash.join("real")).unwrap();
+    fs::write(trash.join("real/user-data.txt"), "precious").unwrap();
+
+    // Dropping another worktree must not sweep it away.
+    let out = env
+        .cowt()
+        .args(["drop", "demo", "--force"])
+        .output()
+        .unwrap();
+    assert!(out.status.success());
+    assert!(
+        trash.join("real/user-data.txt").exists(),
+        "trash holding real must survive the sweep"
+    );
+}

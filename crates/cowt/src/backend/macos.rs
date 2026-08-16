@@ -1101,15 +1101,28 @@ impl Backend for FuseT {
             Ok(target) => target,
             Err(_) => return Ok(()), // not our symlink: nothing to restore
         };
-        if state.file_name().map(|n| n != "view").unwrap_or(true) {
+        // The symlink target must be a cowt VIEW: basename "view" whose
+        // parent is a worktree state dir INSIDE the cowt state root. A
+        // foreign symlink (user data dir whose basename happens to be
+        // "view") must never be deleted, even with a stale pidfile
+        // authorizing the drop (round-31).
+        let state_root = crate::state::State::open()?.root().to_path_buf();
+        let parent = state.parent().unwrap_or_else(|| Path::new(""));
+        let is_cowt_view = state.file_name().map(|n| n == "view").unwrap_or(false)
+            && parent.starts_with(&state_root)
+            && (parent.join("meta.json").is_file()
+                || parent.join("manifest.json").is_file()
+                || parent.join("upper").is_dir());
+        if !is_cowt_view {
             bail!(
-                "symlink at {} points at {} (not a cowt view); refusing to touch it",
+                "symlink at {} points at {} (not a cowt view under the state root); \
+                 refusing to touch it",
                 mountpoint.display(),
                 state.display()
             );
         }
         let layout = Layout {
-            real: state.parent().unwrap_or(Path::new("")).join("real"),
+            real: parent.join("real"),
             view: state.clone(),
         };
         // The state dir was deleted from under the running worktree
