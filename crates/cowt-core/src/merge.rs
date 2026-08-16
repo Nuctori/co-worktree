@@ -596,7 +596,10 @@ fn verify_unchanged(plan: &MergePlan, target_root: &Path, rel: &Path) -> Result<
                     true
                 }
             };
-            meta.is_file() && mode_ok && meta.len() == expected.size && mtime_ns == expected.mtime_ns
+            meta.is_file()
+                && mode_ok
+                && meta.len() == expected.size
+                && mtime_ns == expected.mtime_ns
         }
         EntryKind::Dir => meta.is_dir(),
         EntryKind::Symlink => {

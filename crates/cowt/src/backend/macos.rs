@@ -389,13 +389,13 @@ impl Filesystem for CowFs {
                     let _ = self.copy_up(&rel);
                 }
                 use std::os::unix::fs::PermissionsExt;
-                if let Err(e) = fs::set_permissions(&up, fs::Permissions::from_mode(mode & 0o7777)) {
+                if let Err(e) = fs::set_permissions(&up, fs::Permissions::from_mode(mode & 0o7777))
+                {
                     return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
                 }
             }
         }
         // Truncation is the only other attribute cowt needs.
-        if let Some(size) = size {
         if let Some(size) = size {
             let truncated = if let Some(fh) = fh {
                 let lock = self.fhs.lock().unwrap();

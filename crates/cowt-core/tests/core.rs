@@ -1660,8 +1660,9 @@ fn chmod_only_file_reports_and_restores() {
     let wm = Manifest::scan(&work).unwrap().manifest;
     let changes = diff::diff(&bm, &wm);
     assert!(
-        changes.iter().any(|c| c.path == Path::new("f.txt")
-            && c.kind == diff::ChangeKind::Modified),
+        changes
+            .iter()
+            .any(|c| c.path == Path::new("f.txt") && c.kind == diff::ChangeKind::Modified),
         "chmod-only must be Modified: {:?}",
         changes
     );
@@ -1669,7 +1670,11 @@ fn chmod_only_file_reports_and_restores() {
     assert!(plan.is_clean());
     merge::execute(&plan, &host).unwrap();
     assert_eq!(
-        fs::metadata(host.join("f.txt")).unwrap().permissions().mode() & 0o7777,
+        fs::metadata(host.join("f.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
         0o600,
         "apply must restore the worktree mode"
     );
@@ -1696,8 +1701,9 @@ fn chmod_only_dir_reports_and_restores() {
     let wm = Manifest::scan(&work).unwrap().manifest;
     let changes = diff::diff(&bm, &wm);
     assert!(
-        changes.iter().any(|c| c.path == Path::new("d")
-            && c.kind == diff::ChangeKind::Modified),
+        changes
+            .iter()
+            .any(|c| c.path == Path::new("d") && c.kind == diff::ChangeKind::Modified),
         "dir chmod-only must be Modified: {:?}",
         changes
     );
@@ -1772,7 +1778,11 @@ fn toctou_guard_detects_host_chmod() {
         "host chmod in the window must abort execute"
     );
     assert_eq!(
-        fs::metadata(host.join("f.txt")).unwrap().permissions().mode() & 0o7777,
+        fs::metadata(host.join("f.txt"))
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o7777,
         0o600,
         "host mode must survive the aborted apply"
     );
