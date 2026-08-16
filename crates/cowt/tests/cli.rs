@@ -1327,3 +1327,189 @@ fn fork_rejects_trash_prefixed_name() {
         String::from_utf8_lossy(&out.stderr)
     );
 }
+
+// ---------------------------------------------------------------- R37
+
+/// Round-37: `status` must NOT report "ready" for a worktree whose
+/// manifest.json is corrupted — it previously lied (rc=0 ready) while
+/// diff/apply hit a bare parse error.
+#[test]
+fn status_flags_corrupt_manifest() {
+    let env = Env::new();
+    env.fork();
+    let id = env.state_dir();
+    let meta_path = id.join("manifest.json");
+    fs::write(&meta_path, "{\"manifest_version\":1,\"entries\":").unwrap();
+
+    let out = env.cowt().args(["status", "demo"]).output().unwrap();
+    assert!(
+        out.status.success(),
+        "status must stay runnable on a corrupt manifest"
+    );
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !all.contains("status:    ready") || all.contains("corrupted or unreadable"),
+        "corrupt manifest must be flagged, not silently ready: {all}"
+    );
+    // The warning must point at a recovery action.
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("drop"),
+        "status warning must mention drop: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Round-37: `list` must warn about a worktree-shaped dir whose meta.json
+/// is missing entirely (interrupted fork, external delete) instead of
+/// silently reporting "no worktrees" — its isolated data would strand
+/// invisibly.
+#[test]
+fn list_warns_missing_meta() {
+    let env = Env::new();
+    env.fork();
+    let id = env.state_dir();
+    fs::remove_file(id.join("meta.json")).unwrap();
+
+    let out = env.cowt().arg("list").output().unwrap();
+    assert!(out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("no meta.json"),
+        "list must warn about the meta-less worktree: {stderr}"
+    );
+    assert!(
+        stderr.contains("drop"),
+        "warning must point at the cleanup action: {stderr}"
+    );
+}
+
+/// Round-37: `diff` must not silently report "no changes" when the target
+/// directory is missing — it must warn with the recovery pointer.
+#[test]
+fn diff_warns_missing_target() {
+    let env = Env::new();
+    env.fork();
+    fs::remove_dir_all(&env.target).unwrap();
+
+    let out = env.cowt().args(["diff", "demo"]).output().unwrap();
+    assert!(out.status.success(), "diff stays runnable");
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("does not exist"),
+        "missing target must be diagnosed: {stderr}"
+    );
+    assert!(
+        stderr.contains("real"),
+        "warning must point at the stranded host dir: {stderr}"
+    );
+}
+
+/// Round-37: a corrupt meta.json addressed BY ID must carry the drop hint
+/// (the by-name path got it from list(); the by-id path was bare).
+#[test]
+fn corrupt_meta_by_id_error_has_recovery_hint() {
+    let env = Env::new();
+    env.fork();
+    let id = env.state_dir();
+    fs::write(id.join("meta.json"), "{\"id\":").unwrap();
+
+    let out = env.cowt().args(["status", "demo"]).output().unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains(id.to_str().unwrap()),
+        "error must name the worktree id: {stderr}"
+    );
+    assert!(
+        stderr.contains("drop"),
+        "error must point at drop --force: {stderr}"
+    );
+}
+
+/// Round-37: `doctor` must report damaged/residue state (corrupt manifest,
+/// missing target, trash residue) instead of a uniform three-line health
+/// report, while keeping exit 0 and the header lines.
+#[test]
+fn doctor_reports_damage_and_residue() {
+    let env = Env::new();
+    env.fork();
+    let id = env.state_dir();
+    // Damage: corrupt manifest + missing target.
+    fs::write(
+        id.join("manifest.json"),
+        "{\"manifest_version\":1,\"entries\":",
+    )
+    .unwrap();
+    fs::remove_dir_all(&env.target).unwrap();
+    // Residue: a trash dir in the state root.
+    fs::create_dir_all(env.state.join(".trash-fake-1")).unwrap();
+
+    let out = env.cowt().arg("doctor").output().unwrap();
+    assert!(
+        out.status.success(),
+        "doctor must exit 0 (round-33 contract)"
+    );
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let all = format!("{stdout}{}", String::from_utf8_lossy(&out.stderr));
+    // Header contract (round-33): the first lines stay.
+    assert!(stdout.contains("backend:"));
+    assert!(stdout.contains("available:"));
+    assert!(stdout.contains("state:"));
+    // Damage surfaced.
+    assert!(
+        all.contains("WARN") && all.contains("manifest corrupted"),
+        "doctor must flag the corrupt manifest: {all}"
+    );
+    assert!(
+        all.contains("target missing"),
+        "doctor must flag the missing target: {all}"
+    );
+    // Residue surfaced.
+    assert!(
+        all.contains(".trash-fake-1"),
+        "doctor must report the trash residue: {all}"
+    );
+}
+
+/// Round-37: `status` must show a MISSING upper as missing, not as
+/// "0 bytes of isolated data" (a crash happened; the user should see it).
+#[test]
+fn status_distinguishes_missing_upper_from_empty() {
+    let env = Env::new();
+    env.fork();
+    let id = env.state_dir();
+    fs::remove_dir_all(id.join("upper")).unwrap();
+
+    let out = env.cowt().args(["status", "demo"]).output().unwrap();
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    assert!(
+        stdout.contains("MISSING"),
+        "missing upper must be visible: {stdout}"
+    );
+    assert!(
+        !stdout.contains("0 bytes of isolated data"),
+        "missing upper must not masquerade as empty: {stdout}"
+    );
+}
+
+/// Round-37: `COWT_HOME=""` must name the variable in its warning instead
+/// of failing with a bare path error.
+#[test]
+fn empty_cowt_home_warns_with_variable_name() {
+    let env = Env::new();
+    let out = env
+        .cowt()
+        .env("COWT_HOME", "")
+        .arg("status")
+        .arg("whatever")
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("COWT_HOME"),
+        "empty COWT_HOME must be named: {stderr}"
+    );
+}

@@ -57,6 +57,15 @@ impl State {
     /// (`~/.local/state/cowt` on unix, `%LOCALAPPDATA%\cowt` on Windows).
     pub fn open() -> Result<Self> {
         let root = match std::env::var_os("COWT_HOME") {
+            // Round-37: `COWT_HOME=""` is a misconfiguration (services/CI
+            // commonly export empty vars) — treat it as unset AND say so,
+            // instead of letting PathBuf::from("") fail with a bare
+            // "create state root : os error 3".
+            Some(p) if p.is_empty() => {
+                let home = home_dir().context("HOME is not set and COWT_HOME was not provided")?;
+                eprintln!("cowt: warning: COWT_HOME is set but empty; using the default state dir");
+                default_state_dir(&home)
+            }
             Some(p) => PathBuf::from(p),
             None => {
                 let home = home_dir().context("HOME is not set and COWT_HOME was not provided")?;
@@ -212,7 +221,18 @@ impl State {
     pub fn load_meta(dir: &Path) -> Result<WorktreeMeta> {
         let s = fs::read_to_string(dir.join("meta.json"))
             .with_context(|| format!("read {}", dir.display()))?;
-        serde_json::from_str(&s).context("parse meta.json")
+        serde_json::from_str(&s).with_context(|| {
+            // Round-37: the by-id path (status/diff/apply <id>) used to get
+            // a bare "parse meta.json" with no way to know WHICH worktree
+            // or what to do — the by-name path already got a drop hint from
+            // list()'s warning.
+            format!(
+                "parse meta.json for {} (worktree {}); use `cowt drop {} --force` to discard the damaged worktree",
+                dir.display(),
+                dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+                dir.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default(),
+            )
+        })
     }
 
     pub fn load_manifest(dir: &Path) -> Result<Manifest> {
@@ -233,12 +253,28 @@ impl State {
         for entry in fs::read_dir(&self.root).with_context(|| "read state root")? {
             let entry = entry?;
             let dir = entry.path();
-            if !dir.is_dir() || !dir.join("meta.json").exists() {
-                continue;
-            }
             // A `.trash-*` rename-aside from a failed `drop` is not a
             // worktree; hide it from list/resolve so no ghost entries.
             if entry.file_name().to_string_lossy().starts_with(".trash-") {
+                continue;
+            }
+            if !dir.is_dir() || !dir.join("meta.json").exists() {
+                // Round-37: a worktree-shaped dir with NO meta.json (fork
+                // killed between create_dir and write_meta, or an external
+                // delete of meta.json) is invisible to every command —
+                // isolated data in its upper would strand forever with no
+                // warning. Surface it (resolve still reaches it by id for
+                // `drop --force`).
+                if dir.is_dir()
+                    && (dir.join("manifest.json").exists() || dir.join("upper").is_dir())
+                {
+                    eprintln!(
+                        "cowt: warning: {} has no meta.json (interrupted fork or missing file); \
+                         its isolated data is not listed. Use `cowt drop {} --force` to clean it up",
+                        dir.display(),
+                        entry.file_name().to_string_lossy()
+                    );
+                }
                 continue;
             }
             match Self::load_meta(&dir) {

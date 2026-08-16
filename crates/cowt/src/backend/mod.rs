@@ -644,8 +644,17 @@ pub fn recover_stale_mount(
         backend.unmount(target)?;
         Ok(true)
     } else {
+        // Round-37: this refusal is the user-visible exit of the round-36-01
+        // kill-window (mount up, pidfile never written) AND of the foreign
+        // mount guard. Give an action for both cases.
         anyhow::bail!(
-            "{} is already a mountpoint; refusing to stack a second overlay",
+            "{} is already a mountpoint; refusing to stack a second overlay. \
+             If this is a leftover from a crashed `cowt run` (your isolated data is in \
+             {}), unmount it manually: `fusermount3 -u {}` or `umount {}`. \
+             If you did not mount it, something else owns it — do not unmount.",
+            target.display(),
+            dir.display(),
+            target.display(),
             target.display()
         )
     }

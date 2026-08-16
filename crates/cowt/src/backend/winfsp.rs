@@ -164,9 +164,15 @@ impl Backend for WinFspBackend {
                     layout.real.display()
                 )
             } else {
+                // Round-37: "move aside" is internal jargon; the real
+                // failure is usually a deleted/moved target directory.
                 anyhow::Error::from(e).context(format!(
-                    "move {} aside to {}",
+                    "cannot set up {}: the target directory is missing or not accessible \
+                     (trying to move it to {}). If a crashed run already moved it, the \
+                     host data is at {} and the next command restores it; otherwise check \
+                     whether the directory was deleted externally",
                     mountpoint.display(),
+                    layout.real.display(),
                     layout.real.display()
                 ))
             }

@@ -28,6 +28,20 @@ pub fn diff_cmd(args: DiffArgs) -> Result<()> {
     // dangling junction would make the target scan come up empty.
     recover_stale_mount(default_backend().as_ref(), &dir, &meta.target)?;
 
+    // Round-37: a missing target was SILENTLY invisible to plain `diff`
+    // ("no changes", rc=0) — the isolated-layer diff never touches the
+    // host. Diagnose it up front.
+    if !meta.target.is_dir() {
+        eprintln!(
+            "cowt: warning: target directory {} does not exist; \
+             the reported changes are against an empty host. \
+             If a crashed run moved the host aside, it is at {} and will be \
+             restored by the next run/diff/apply",
+            crate::state::sanitize_display(&meta.target.display().to_string()),
+            crate::state::sanitize_display(&dir.join("real").display().to_string())
+        );
+    }
+
     let base = State::load_manifest(&dir)?;
     let upper = dir.join("upper");
     let started = std::time::Instant::now();

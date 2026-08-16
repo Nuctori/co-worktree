@@ -389,6 +389,33 @@ All notable changes to co-worktree are documented here.
 - Regression locks: copy-tmp invisibility (effective_manifest + plan),
   stale tmp sweep, staging sweep.
 
+### Added — round 37 (doctor diagnostics & user recoverability)
+
+- `cowt doctor` expanded beyond backend/state-root: per-worktree health
+  scan (corrupt/missing meta, corrupt manifest, missing target with
+  real-strand detection, live/stale pidfile, missing upper) plus a residue
+  scan (.trash-*, *.json.tmp-*, .cowt-apply-*, .cowt-copy-tmp.*). The
+  round-33 contract holds: header lines first, exit 0, nothing deleted.
+- `status` no longer reports "ready" for a worktree with a corrupt
+  manifest (it never read manifest.json before), flags a missing target,
+  and shows a MISSING upper instead of "0 bytes of isolated data".
+- `diff` warns when the target directory is missing (previously a silent
+  "no changes" rc=0); `apply`'s scan error and the winfsp run failure now
+  name the target and point at the stranded `real` dir and recovery.
+- Corrupt `meta.json` errors by id now name the worktree and suggest
+  `drop --force` (the by-name path already had the hint).
+- `list` warns about worktree-shaped dirs with NO meta.json (interrupted
+  fork, external delete) — their isolated data was invisible before.
+- `COWT_HOME=""` is diagnosed by name instead of a bare "state root" path
+  error.
+- Windows: apply's conflict output points at `.cowt-old-*` backups
+  (interrupted two-step rename) with the `mv` restore command.
+- README gained a "Troubleshooting & manual recovery" section covering
+  every known manual step with its data-safety guard.
+- Regression locks: status/corrupt-manifest, list/missing-meta,
+  diff/missing-target, doctor damage+residue reporting, missing-upper
+  display, empty COWT_HOME.
+
 ### Known limitations
 
 - Crash windows with manual-only recovery (round-36, not auto-healed):

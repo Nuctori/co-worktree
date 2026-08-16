@@ -42,7 +42,20 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
     // hash when size/mtime match, but an external tool can rewrite a file
     // preserving both (touch -r, rsync -t, FAT 2s mtime granularity) — a
     // silent overwrite of that change by apply would lose data.
-    let current = Manifest::scan(&meta.target)?.manifest;
+    let current = Manifest::scan(&meta.target)
+        .map_err(|e| {
+            // Round-37: a bare "io error on <path>" gave no hint what to do
+            // when the target is missing (crashed-run strand or external
+            // delete).
+            anyhow::anyhow!(
+                "cannot scan target directory {}: {e}; if a crashed run moved it aside it \
+                 is at {} (any command restores it), otherwise check whether it was deleted \
+                 externally",
+                meta.target.display(),
+                dir.join("real").display()
+            )
+        })?
+        .manifest;
     // Round-23 guard: a whiteout whose victim exists on the host but NOT in
     // the base manifest means the base is semantically corrupted (entries
     // wiped, or a foreign manifest copied in). Planning would hit the
@@ -104,6 +117,29 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
                 "resolve manually, or `cowt drop {}` to discard the worktree",
                 meta.id
             );
+            // Round-37: a .cowt-old-* backup file (Windows two-step rename
+            // crash window, round-36-06) is the PRE-apply data of a file
+            // whose apply was interrupted; a permanent Delete-vs-modify
+            // conflict on it is recoverable by restoring the backup.
+            #[cfg(not(unix))]
+            if let Ok(rd) = std::fs::read_dir(&meta.target) {
+                let mut old: Vec<String> = rd
+                    .flatten()
+                    .filter_map(|e| {
+                        let n = e.file_name().to_string_lossy().into_owned();
+                        n.contains(".cowt-old-").then_some(n)
+                    })
+                    .collect();
+                old.sort();
+                if !old.is_empty() {
+                    eprintln!(
+                        "note: interrupted-apply backup file(s) found: {}; \
+                         each is the pre-apply content of the matching file — \
+                         restore with `mv <name>.cowt-old-<pid> <name>`",
+                        old.join(", ")
+                    );
+                }
+            }
         }
         return Ok(3);
     }

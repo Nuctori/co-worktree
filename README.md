@@ -180,6 +180,41 @@ Windows cross-compile check, release builds for all three.
 | sequential write overhead | < 20% | kernel-overlay ~9% (CI); fuse-overlayfs ~4–7% |
 | 10k-file diff | < 3s | ~20–200ms |
 
+## Troubleshooting & manual recovery
+
+`cowt doctor` reports backend availability plus a per-worktree health scan
+(corrupt/missing meta or manifest, missing target, stranded `real`, stale
+pidfiles) and leftover residue — run it first when something looks wrong.
+
+Most crash leftovers self-heal on the next command:
+
+| Situation | What happens | Action needed |
+| --- | --- | --- |
+| `kill -9` between mount and pidfile (Linux) | next `run`/`diff`/`apply` detects the mount via its `upperdir=` option and tears it down | none |
+| Target dir missing, `state/<id>/real` exists (macOS/winfsp crash strand) | next command restores the host dir | none |
+| `upper/` missing (crashed apply) | treated as empty; `run` recreates it | none |
+| `*.json.tmp-*` / `.cowt-apply-*` / `.cowt-copy-tmp.*` residue | cleaned by the next write/apply; copy-tmp is ignored by diff | none |
+| Stale `run.pid` (dead pid) | replaced atomically by the next `run` | none |
+
+Manual recovery (only when automatic recovery cannot run):
+
+- **macOS stranded host dir**: `mv <state>/<id>/real <target>` (when the
+  mountpoint symlink is gone and commands refuse).
+- **Windows interrupted-apply backup** (`foo.cowt-old-<pid>` in the target):
+  the file is the pre-apply content of `foo`; restore with
+  `mv foo.cowt-old-<pid> foo`, then re-run `cowt apply`.
+- **Leftover mount that refuses to clear**: `fusermount3 -u <target>` or
+  `umount <target>` (Linux); `cowt drop --force` otherwise. Never unmount a
+  mount you did not create.
+- **`.trash-*` leftovers** from an interrupted `drop`: the next `drop` of
+  any worktree sweeps them. Manually: inspect first — a trash holding a
+  `real/` subdirectory contains the MOVED-ASIDE HOST DIRECTORY and must
+  never be deleted (restore it with `mv <trash>/real <target>` instead).
+- **Corrupt `meta.json`/`manifest.json`**: `cowt drop <id> --force`
+  discards the worktree (isolated data only; the host is untouched). For a
+  corrupt manifest with data worth keeping, restore `manifest.json` from a
+  backup first.
+
 ## Development
 
 ```sh
