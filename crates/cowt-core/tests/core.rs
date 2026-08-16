@@ -1636,6 +1636,148 @@ fn macos_scan_canonicalizes_keys_to_nfc() {
     assert!(m.get(Path::new("cafe\u{301}.txt")).is_none());
 }
 
+// ---------------------------------------------------------------- R30
+
+/// Round-30: chmod-only on a FILE reports Modified and apply restores the
+/// mode; round-trip is symmetric.
+#[cfg(unix)]
+#[test]
+fn chmod_only_file_reports_and_restores() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "f.txt", "content");
+    write(&host, "f.txt", "content");
+    write(&work, "f.txt", "content");
+    fs::set_permissions(work.join("f.txt"), fs::Permissions::from_mode(0o600)).unwrap();
+
+    let (bm, cm, _) = diff::diff_trees(&base, &host).unwrap();
+    let wm = Manifest::scan(&work).unwrap().manifest;
+    let changes = diff::diff(&bm, &wm);
+    assert!(
+        changes.iter().any(|c| c.path == Path::new("f.txt")
+            && c.kind == diff::ChangeKind::Modified),
+        "chmod-only must be Modified: {:?}",
+        changes
+    );
+    let plan = merge::plan(&bm, &cm, &wm, &work);
+    assert!(plan.is_clean());
+    merge::execute(&plan, &host).unwrap();
+    assert_eq!(
+        fs::metadata(host.join("f.txt")).unwrap().permissions().mode() & 0o7777,
+        0o600,
+        "apply must restore the worktree mode"
+    );
+}
+
+/// Round-30: chmod-only on a DIRECTORY reports Modified and apply restores
+/// the mode (was: zero changes, mode never applied — round-30 fix).
+#[cfg(unix)]
+#[test]
+fn chmod_only_dir_reports_and_restores() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+        fs::create_dir_all(d.join("d")).unwrap();
+    }
+    fs::set_permissions(work.join("d"), fs::Permissions::from_mode(0o700)).unwrap();
+
+    let bm = Manifest::scan(&base).unwrap().manifest;
+    let cm = Manifest::scan(&host).unwrap().manifest;
+    let wm = Manifest::scan(&work).unwrap().manifest;
+    let changes = diff::diff(&bm, &wm);
+    assert!(
+        changes.iter().any(|c| c.path == Path::new("d")
+            && c.kind == diff::ChangeKind::Modified),
+        "dir chmod-only must be Modified: {:?}",
+        changes
+    );
+    let plan = merge::plan(&bm, &cm, &wm, &work);
+    assert!(plan.is_clean());
+    merge::execute(&plan, &host).unwrap();
+    assert_eq!(
+        fs::metadata(host.join("d")).unwrap().permissions().mode() & 0o7777,
+        0o700,
+        "apply must restore the worktree dir mode"
+    );
+}
+
+/// Round-30: touch-only (mtime change, same content) is NOT a change —
+/// content equality deliberately ignores mtime, otherwise apply would
+/// never converge.
+#[cfg(unix)]
+#[test]
+fn touch_only_is_not_a_change() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let work = tmp.path().join("work");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&work).unwrap();
+    write(&base, "f.txt", "content");
+    write(&work, "f.txt", "content");
+    // Different mtime, same content+mode.
+    fs::set_permissions(work.join("f.txt"), fs::Permissions::from_mode(0o644)).unwrap();
+    let later = std::time::SystemTime::now() + std::time::Duration::from_secs(10);
+    let f = fs::OpenOptions::new()
+        .write(true)
+        .open(work.join("f.txt"))
+        .unwrap();
+    let _ = f.set_times(fs::FileTimes::new().set_modified(later));
+    drop(f);
+
+    let bm = Manifest::scan(&base).unwrap().manifest;
+    let wm = Manifest::scan(&work).unwrap().manifest;
+    let changes = diff::diff(&bm, &wm);
+    assert!(
+        changes.iter().all(|c| c.path != Path::new("f.txt")),
+        "touch-only must not report a change: {:?}",
+        changes
+    );
+}
+
+/// Round-30: TOCTOU guard detects a host chmod in the plan->execute window
+/// (mode counts as content).
+#[cfg(unix)]
+#[test]
+fn toctou_guard_detects_host_chmod() {
+    use std::os::unix::fs::PermissionsExt;
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    let work = tmp.path().join("work");
+    for d in [&base, &host, &work] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base, "f.txt", "v1");
+    write(&host, "f.txt", "v1");
+    write(&work, "f.txt", "v2");
+    fs::set_permissions(host.join("f.txt"), fs::Permissions::from_mode(0o644)).unwrap();
+
+    let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
+    assert!(plan.is_clean());
+    // Host chmod after planning (content unchanged, only mode differs).
+    fs::set_permissions(host.join("f.txt"), fs::Permissions::from_mode(0o600)).unwrap();
+    assert!(
+        merge::execute(&plan, &host).is_err(),
+        "host chmod in the window must abort execute"
+    );
+    assert_eq!(
+        fs::metadata(host.join("f.txt")).unwrap().permissions().mode() & 0o7777,
+        0o600,
+        "host mode must survive the aborted apply"
+    );
+}
+
 /// Round-29: NFC and NFD spellings of the same name are distinct byte keys
 /// on Linux (ext4 normalization-sensitive) — locking that semantics. On
 /// macOS, APFS stores them as one file and cowt NFC-canonicalizes keys, so

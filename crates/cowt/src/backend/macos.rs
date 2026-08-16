@@ -363,7 +363,7 @@ impl Filesystem for CowFs {
         &mut self,
         _req: &Request<'_>,
         ino: u64,
-        _mode: Option<u32>,
+        mode: Option<u32>,
         _uid: Option<u32>,
         _gid: Option<u32>,
         size: Option<u64>,
@@ -377,7 +377,25 @@ impl Filesystem for CowFs {
         _flags: Option<u32>,
         reply: ReplyAttr,
     ) {
-        // Truncation is the only attribute cowt needs.
+        // chmod inside the worktree must persist into the isolated layer —
+        // otherwise the whole chmod-only detection chain is dead on macOS
+        // (round-30). Copy up first (never touch the host dir), then apply
+        // the permission bits to the upper copy.
+        if let Some(mode) = mode {
+            let rel = self.inos.lock().unwrap().path_of(ino);
+            if let Some(rel) = rel {
+                let up = self.upper_of(&rel);
+                if fs::symlink_metadata(&up).is_err() {
+                    let _ = self.copy_up(&rel);
+                }
+                use std::os::unix::fs::PermissionsExt;
+                if let Err(e) = fs::set_permissions(&up, fs::Permissions::from_mode(mode & 0o7777)) {
+                    return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+                }
+            }
+        }
+        // Truncation is the only other attribute cowt needs.
+        if let Some(size) = size {
         if let Some(size) = size {
             let truncated = if let Some(fh) = fh {
                 let lock = self.fhs.lock().unwrap();
@@ -424,7 +442,7 @@ impl Filesystem for CowFs {
         _req: &Request<'_>,
         parent: u64,
         name: &OsStr,
-        _mode: u32,
+        mode: u32,
         _umask: u32,
         reply: ReplyEntry,
     ) {
@@ -449,7 +467,14 @@ impl Filesystem for CowFs {
             return reply.error(libc::EPERM);
         }
         self.clear_whiteout(&rel);
-        if let Err(e) = fs::create_dir_all(self.upper_of(&rel)) {
+        let dst = self.upper_of(&rel);
+        if let Err(e) = fs::create_dir_all(&dst) {
+            return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
+        }
+        // Preserve the requested permission bits instead of the umask
+        // default, so a private (0700) dir stays private (round-30).
+        use std::os::unix::fs::PermissionsExt;
+        if let Err(e) = fs::set_permissions(&dst, fs::Permissions::from_mode(mode & 0o7777)) {
             return reply.error(e.raw_os_error().unwrap_or(libc::EIO));
         }
         match self.attr_of(&rel) {

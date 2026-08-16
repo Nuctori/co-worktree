@@ -242,6 +242,24 @@ All notable changes to co-worktree are documented here.
 - Regression locks: non-UTF-8 skip-with-warning; NFC/NFD distinct keys on
   normalization-sensitive filesystems.
 
+### Added — round 30 (mode/mtime change detection & apply restore)
+
+- Directory permission bits now count as content on unix (like files):
+  a chmod-only change on a directory is visible to `diff`, and `apply`
+  restores the worktree's mode — previously a `mkdir -m 0700` was widened
+  to the umask default (0755) on the host, and dir chmods were silently
+  dropped.
+- macOS: `setattr` now writes the mode back into the isolated layer (copy
+  up first, never touching the host) and `mkdir` preserves the requested
+  permission bits — `chmod +x` inside a worktree actually works now (the
+  chmod-only detection chain was dead at its source on macOS).
+- TOCTOU guard: a host chmod between planning and execution aborts the
+  apply (mode counts as content, matching `content_eq`).
+- Regression locks: file/dir chmod-only → Modified → apply restores mode;
+  touch-only is NOT a change (mtime deliberately excluded from content
+  equality, otherwise apply would never converge); host chmod in the
+  plan→execute window aborts.
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX

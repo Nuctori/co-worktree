@@ -186,7 +186,7 @@ fn print_plan(plan: &merge::MergePlan) {
                     crate::state::sanitize_display(&target.display().to_string())
                 )
             }
-            merge::Operation::Mkdir { path } => println!(
+            merge::Operation::Mkdir { path, .. } => println!(
                 "  mkdir  {}",
                 crate::state::sanitize_display(&path.display().to_string())
             ),

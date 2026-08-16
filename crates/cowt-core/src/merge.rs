@@ -36,8 +36,9 @@ pub enum Operation {
     WriteFile { path: PathBuf, source: PathBuf },
     /// Create a symlink at `path` pointing at `target`.
     WriteSymlink { path: PathBuf, target: PathBuf },
-    /// Create a directory.
-    Mkdir { path: PathBuf },
+    /// Create a directory. `mode` is the unix permission bits to apply
+    /// after creation (0 on platforms without them; round-30).
+    Mkdir { path: PathBuf, mode: u32 },
     /// Delete a file, symlink or empty directory. `migration` marks a
     /// kind-migration delete (file↔dir, symlink↔file): it must run BEFORE
     /// the matching Mkdir/WriteFile of the new kind, so it sorts first.
@@ -207,7 +208,7 @@ pub fn plan(base: &Manifest, current: &Manifest, work: &Manifest, work_root: &Pa
         let path = match op {
             Operation::WriteFile { path, .. }
             | Operation::WriteSymlink { path, .. }
-            | Operation::Mkdir { path }
+            | Operation::Mkdir { path, .. }
             | Operation::Delete { path, .. } => path,
         };
         if let Some(e) = current.entries.get(path) {
@@ -272,6 +273,7 @@ fn write_op(path: &Path, entry: &Entry, work_root: &Path) -> Operation {
         },
         EntryKind::Dir => Operation::Mkdir {
             path: path.to_path_buf(),
+            mode: entry.mode,
         },
     }
 }
@@ -282,7 +284,7 @@ fn write_op(path: &Path, entry: &Entry, work_root: &Path) -> Operation {
 /// before the new kind is created at the same path.
 fn op_sort_key(op: &Operation) -> (usize, u8, PathBuf) {
     let (path, order) = match op {
-        Operation::Mkdir { path } => (path, 0u8),
+        Operation::Mkdir { path, .. } => (path, 0u8),
         Operation::WriteFile { path, .. } => (path, 1),
         Operation::WriteSymlink { path, .. } => (path, 1),
         Operation::Delete { path, migration } => (path, if *migration { 0 } else { 2 }),
@@ -400,7 +402,9 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
     // written file. Staged bodies are independent of the host, so deleting
     // first cannot lose data; rename's create_dir_all covers missing parents.
     for op in &plan.operations {
-        if let Operation::Mkdir { path } = op {
+        if let Operation::Mkdir { path, mode } = op {
+            #[cfg(not(unix))]
+            let _ = mode;
             verify_unchanged(plan, target_root, path)?;
             let dest = target_root.join(path);
             // Kind migration file->dir: the old non-directory entry must go
@@ -412,6 +416,17 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
                 }
             }
             fs::create_dir_all(&dest).map_err(|e| Error::io(dest.clone(), e))?;
+            // Restore the worktree's permission bits: create_dir_all applies
+            // the umask, which would widen a private (0700) dir to 0755
+            // (round-30). Mode 0 means "no info" on this platform.
+            #[cfg(unix)]
+            let mode = *mode;
+            #[cfg(unix)]
+            if mode != 0 {
+                use std::os::unix::fs::PermissionsExt;
+                fs::set_permissions(&dest, fs::Permissions::from_mode(mode))
+                    .map_err(|e| Error::io(dest.clone(), e))?;
+            }
             report.written += 1;
         }
     }
@@ -567,7 +582,21 @@ fn verify_unchanged(plan: &MergePlan, target_root: &Path, rel: &Path) -> Result<
         .unwrap_or(0);
     let unchanged = match expected.kind {
         EntryKind::File => {
-            meta.is_file() && meta.len() == expected.size && mtime_ns == expected.mtime_ns
+            // mode counts as content (content_eq, round-15); a host chmod in
+            // the plan->execute window must abort like any other change
+            // (round-30).
+            let mode_ok = {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::MetadataExt;
+                    meta.mode() == expected.mode
+                }
+                #[cfg(not(unix))]
+                {
+                    true
+                }
+            };
+            meta.is_file() && mode_ok && meta.len() == expected.size && mtime_ns == expected.mtime_ns
         }
         EntryKind::Dir => meta.is_dir(),
         EntryKind::Symlink => {

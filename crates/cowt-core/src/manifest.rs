@@ -69,7 +69,19 @@ impl Entry {
                     }
                 }
             }
-            EntryKind::Dir => true,
+            EntryKind::Dir => {
+                // Directory permission bits count as content on unix too:
+                // a chmod-only change on a directory must be visible to
+                // diff and restored by apply (round-30, mirrors File).
+                #[cfg(unix)]
+                {
+                    self.mode == other.mode
+                }
+                #[cfg(not(unix))]
+                {
+                    true
+                }
+            }
             EntryKind::Symlink => self.link_target == other.link_target,
         }
     }
