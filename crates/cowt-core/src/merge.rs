@@ -329,6 +329,12 @@ pub fn execute(plan_result: &MergePlan, target_root: &Path) -> Result<ApplyRepor
             .unwrap_or(0)
     ));
     fs::create_dir_all(&staging).map_err(|e| Error::io(staging.clone(), e))?;
+    // Round-40 review: a marker file makes the staging dir recognizable —
+    // the sweep (state.rs) must never delete a USER directory that merely
+    // matches the `.cowt-apply-<deadpid>-*` name pattern in user-owned
+    // space. Best-effort: a missing marker only loses crash-residue
+    // sweeping, never correctness.
+    let _ = fs::write(staging.join(".cowt-staging"), b"");
 
     let result = execute_inner(plan_result, target_root, &staging);
     // Best-effort cleanup of the staging area; it is empty on success.

@@ -58,6 +58,21 @@ pub struct CowFs {
 
 const ROOT_INO: u64 = 1;
 const WHITEOUT_PREFIX: &str = ".wh.";
+/// Reserved namespace for winfsp/macos copy_up temp files (round-36): a
+/// crash between copy and rename leaves `.cowt-copy-tmp.<name>` in upper;
+/// effective_manifest filters it. A USER file with this prefix through the
+/// view would be silently invisible to diff and never applied (round-40
+/// review) — refuse at create like the whiteout namespace.
+const COPY_TMP_PREFIX: &str = ".cowt-copy-tmp.";
+
+/// True when `name` falls into a reserved namespace (whiteouts, copy_up
+/// temp files) — such user files would be misinterpreted or invisible at
+/// apply time. Every create path (create/mkdir/mknod/symlink) must refuse
+/// them (round-21 + round-40 review).
+fn is_reserved_name(name: &OsStr) -> bool {
+    let s = name.to_string_lossy();
+    s.starts_with(WHITEOUT_PREFIX) || s.starts_with(COPY_TMP_PREFIX)
+}
 
 struct InoTable {
     next: u64,
@@ -467,15 +482,11 @@ impl Filesystem for CowFs {
         else {
             return reply.error(libc::ENOENT);
         };
-        // `.wh.` is the reserved whiteout namespace; a user file with that
-        // prefix would be indistinguishable from a deletion marker at apply
-        // time — refuse, same as the winfsp backend (round-21).
-        if rel
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with(WHITEOUT_PREFIX))
-            .unwrap_or(false)
-        {
+        // `.wh.`/`.cowt-copy-tmp.` are reserved namespaces; a user file
+        // with those prefixes would be misread as a deletion marker or be
+        // silently invisible at apply time — refuse, same as the winfsp
+        // backend (round-21, round-40 review).
+        if is_reserved_name(name) {
             return reply.error(libc::EPERM);
         }
         self.clear_whiteout(&rel);
@@ -551,6 +562,11 @@ impl Filesystem for CowFs {
         else {
             return reply.error(libc::ENOENT);
         };
+        // `.wh.`/`.cowt-copy-tmp.` are reserved namespaces — refuse
+        // (round-21, round-40 review).
+        if is_reserved_name(name) {
+            return reply.error(libc::EPERM);
+        }
         self.clear_whiteout(&rel);
         let dst = self.upper_of(&rel);
         if let Some(p) = dst.parent() {
@@ -595,6 +611,13 @@ impl Filesystem for CowFs {
         else {
             return reply.error(libc::ENOENT);
         };
+        // `.wh.`/`.cowt-copy-tmp.` are reserved namespaces; a user file
+        // with those prefixes would be misread as a deletion marker or be
+        // silently invisible at apply time — refuse (round-21, round-40
+        // review: mknod was the one create path without the guard).
+        if is_reserved_name(name) {
+            return reply.error(libc::EPERM);
+        }
         self.clear_whiteout(&rel);
         let dst = self.upper_of(&rel);
         if let Some(p) = dst.parent() {
@@ -884,15 +907,11 @@ impl Filesystem for CowFs {
         else {
             return reply.error(libc::ENOENT);
         };
-        // `.wh.` is the reserved whiteout namespace; a user file with that
-        // prefix would be indistinguishable from a deletion marker at apply
-        // time — refuse, same as the winfsp backend (round-21).
-        if rel
-            .file_name()
-            .and_then(|n| n.to_str())
-            .map(|n| n.starts_with(WHITEOUT_PREFIX))
-            .unwrap_or(false)
-        {
+        // `.wh.`/`.cowt-copy-tmp.` are reserved namespaces; a user file
+        // with those prefixes would be misread as a deletion marker or be
+        // silently invisible at apply time — refuse, same as the winfsp
+        // backend (round-21, round-40 review).
+        if is_reserved_name(name) {
             return reply.error(libc::EPERM);
         }
         self.clear_whiteout(&rel);

@@ -486,6 +486,30 @@ All notable changes to co-worktree are documented here.
 - Regression locks: separator-insensitive fold equality (core, all
   platforms), escaping-id rejection (state unit).
 
+### Added — round 40 hardening (post-series review fixes)
+
+- macOS: `mknod` was the one create path without the reserved-namespace
+  guard — a user `mknod`-created `.wh.foo` (0-byte regular file) was
+  classified as a deletion marker at apply time and deleted the host's
+  `foo`. All create paths (create/mkdir/mknod/symlink) now share an
+  `is_reserved_name` check covering `.wh.` AND `.cowt-copy-tmp.` (a user
+  file in the copy-tmp namespace was silently invisible to diff and never
+  applied). winfsp create extended the same way.
+- `write_pidfile` stale replacement is now conditional: the remove only
+  happens if the pidfile still holds the exact content judged stale — a
+  concurrent runner's LIVE pidfile written between judge and remove is no
+  longer deleted (that left the winner unowned).
+- `kill_child_process_group` (Linux) verifies the pid is still our zombie
+  (state 'Z' in /proc) before killing the group — after `wait()` reaps the
+  child, the pid/pgid could have been recycled and the kill would hit
+  innocent processes. If the pid is gone or reused, the group kill is
+  skipped with a warning.
+- `sweep_stale_staging` requires the `.cowt-staging` marker (written by
+  merge::execute) before deleting: a user directory in user-owned space
+  that merely matches the `.cowt-apply-<deadpid>-*` name pattern is never
+  touched.
+- Regression locks: staging-marker sweep semantics (state unit).
+
 ### Known limitations
 
 - Crash windows with manual-only recovery (round-36, not auto-healed):

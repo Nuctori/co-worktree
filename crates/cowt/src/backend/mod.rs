@@ -126,6 +126,32 @@ impl Drop for ChildSignalGuard {
 /// (round-26).
 #[cfg(unix)]
 pub(crate) fn kill_child_process_group(pid: u32) {
+    // Round-40 review: `child.wait()` reaps the child BEFORE this runs;
+    // between the reap and the kill the pid (and thus the pgid) could be
+    // recycled by a NEW group leader — killing it would hit innocent
+    // processes. On Linux the zombie keeps the pid allocated: if the pid
+    // is still our zombie (state 'Z'), the group cannot have been
+    // recycled. If it is gone or reused, skip the kill (any surviving
+    // grandchildren just make the unmount fail with EBUSY and warn).
+    #[cfg(target_os = "linux")]
+    {
+        let still_ours = std::fs::read_to_string(format!("/proc/{pid}/stat"))
+            .ok()
+            .and_then(|s| {
+                let after_comm = s.rfind(')')?;
+                s[after_comm + 1..]
+                    .split_whitespace()
+                    .next()
+                    .map(|st| st == "Z")
+            })
+            .unwrap_or(false);
+        if !still_ours {
+            eprintln!(
+                "cowt: warning: child group {pid} already reaped/recycled; skipping group kill"
+            );
+            return;
+        }
+    }
     unsafe {
         libc::kill(-(pid as i32), libc::SIGKILL);
     }
@@ -375,6 +401,23 @@ pub(crate) fn write_pidfile(path: &Path, pid: u32) -> std::io::Result<()> {
                     // closes the read-judge-write race — two concurrent
                     // runners both find it stale, but only one wins the
                     // O_EXCL create after removal (round-28).
+                    //
+                    // Round-40 review: the REMOVE itself must be
+                    // conditional — a concurrent runner may replace the
+                    // stale file with its LIVE pidfile between our judge
+                    // and our remove; deleting that would leave the winner
+                    // unowned (its teardown and drop ownership proofs would
+                    // break). Re-read and abort if the content changed.
+                    let judged = s.unwrap_or_default();
+                    match fs::read_to_string(path) {
+                        Ok(cur) if cur != judged => {
+                            return Err(std::io::Error::new(
+                                std::io::ErrorKind::AlreadyExists,
+                                "another `cowt run` claimed the pidfile during the stale-replacement window",
+                            ));
+                        }
+                        _ => {}
+                    }
                     match fs::remove_file(path) {
                         Ok(()) => {}
                         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}

@@ -811,11 +811,14 @@ impl FileSystemContext for CowFs {
         // `.wh.` is the reserved whiteout namespace. Creating a user file
         // with that prefix would be indistinguishable from a deletion marker
         // at apply time (a 0-byte `.wh.notes.txt` deletes the host's
-        // notes.txt the user never touched) — refuse (round-21).
+        // notes.txt the user never touched) — refuse (round-21). The
+        // `.cowt-copy-tmp.` namespace is reserved for copy_up crash
+        // residues (round-36); a user file there would be invisible to
+        // diff and never applied (round-40 review).
         if rel
             .file_name()
             .and_then(|n| n.to_str())
-            .map(|n| n.starts_with(WHITEOUT_PREFIX))
+            .map(|n| n.starts_with(WHITEOUT_PREFIX) || n.starts_with(".cowt-copy-tmp."))
             .unwrap_or(false)
         {
             return Err(FspError::IO(ErrorKind::PermissionDenied));

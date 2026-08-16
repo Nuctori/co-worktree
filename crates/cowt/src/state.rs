@@ -502,7 +502,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
 
 /// Sweep stale `.cowt-apply-<pid>-<nanos>` staging dirs from a crashed
 /// `cowt apply` in `parent` (round-36). Only dirs whose pid is dead are
-/// removed — a live concurrent apply keeps its staging area.
+/// removed — a live concurrent apply keeps its staging area. Round-40
+/// review: a marker file inside the dir (written by merge::execute) must
+/// be present — a USER directory matching the name pattern in user-owned
+/// space must never be deleted.
 pub fn sweep_stale_staging(parent: &std::path::Path) {
     let Ok(rd) = std::fs::read_dir(parent) else {
         return;
@@ -517,6 +520,9 @@ pub fn sweep_stale_staging(parent: &std::path::Path) {
         };
         if pid_alive(pid) {
             continue; // live concurrent apply
+        }
+        if !e.path().join(".cowt-staging").is_file() {
+            continue; // not a cowt staging dir — leave user data alone
         }
         if e.path().is_dir() {
             let _ = std::fs::remove_dir_all(e.path());
@@ -900,6 +906,8 @@ mod tests {
 
     /// Round-36: sweep_stale_staging removes `.cowt-apply-*` dirs whose pid
     /// is dead, and keeps live ones (a concurrent apply's staging area).
+    /// Round-40 review: a dir without the `.cowt-staging` marker is a USER
+    /// directory and must never be deleted.
     #[test]
     fn sweep_stale_staging_removes_dead_keeps_live() {
         let tmp = tempfile::tempdir().unwrap();
@@ -908,12 +916,22 @@ mod tests {
             .path()
             .join(format!(".cowt-apply-{}-1", std::process::id()));
         let other = tmp.path().join("real-user-dir");
-        for d in [&dead, &live, &other] {
+        // A user dir that matches the name pattern (dead pid) but is not a
+        // cowt staging dir — must survive (round-40).
+        let user_lookalike = tmp.path().join(".cowt-apply-999999998-backup");
+        for d in [&dead, &live, &other, &user_lookalike] {
             fs::create_dir_all(d).unwrap();
         }
+        // Real staging dirs carry the marker; lookalikes do not.
+        fs::write(dead.join(".cowt-staging"), b"").unwrap();
+        fs::write(live.join(".cowt-staging"), b"").unwrap();
         sweep_stale_staging(tmp.path());
         assert!(!dead.exists(), "dead staging dir must be swept");
         assert!(live.exists(), "live staging dir must be kept");
         assert!(other.exists(), "non-staging dirs must never be touched");
+        assert!(
+            user_lookalike.exists(),
+            "user dir matching the name pattern must never be deleted"
+        );
     }
 }
