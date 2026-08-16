@@ -359,7 +359,13 @@ pub fn case_fold_conflicts(base: &Manifest, work: &Manifest, current: &Manifest)
             if bp == p {
                 continue;
             }
-            if bp.to_string_lossy().to_lowercase() == folded {
+            if bp.to_string_lossy().to_lowercase() == folded
+                // Only a real collision when the other spelling SURVIVES
+                // in the worktree: a case-different recreate (delete
+                // cache.bin + add CACHE.BIN) is a rename-in-place on NTFS
+                // and must apply cleanly (e2e_case_recreate).
+                && work.entries.contains_key(bp)
+            {
                 conflicts.push(p.clone());
                 break;
             }

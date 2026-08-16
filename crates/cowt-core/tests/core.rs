@@ -2089,6 +2089,19 @@ fn case_fold_conflicts_detects_case_variant_add() {
         coll2.is_empty(),
         "no conflicts for identical keys: {coll2:?}"
     );
+    // A case-different RECREATE (old spelling deleted in work) is a
+    // rename-in-place on NTFS — NOT a conflict (e2e_case_recreate).
+    let base2 = tmp.path().join("base2");
+    fs::create_dir_all(&base2).unwrap();
+    write(&base2, "cache.bin", "old");
+    let work_recreate = tmp.path().join("work2");
+    fs::create_dir_all(&work_recreate).unwrap();
+    write(&work_recreate, "CACHE.BIN", "reborn");
+    let coll3 = merge::case_fold_conflicts(&scan(&base2), &scan(&work_recreate), &scan(&host));
+    assert!(
+        coll3.is_empty(),
+        "delete+recreate with different case must not conflict: {coll3:?}"
+    );
 }
 
 /// Round-38-04: manifest keys colliding by case alone are detected by the
@@ -2104,10 +2117,13 @@ fn case_fold_collision_keys_detected() {
     write(&d, "a/A.txt", "y");
     let m = scan(&d);
     let coll = cowt_core::manifest::case_fold_collision_keys(&m.entries);
-    assert_eq!(
-        coll.len(),
-        2,
-        "both colliding keys must be reported: {coll:?}"
+    // The dirs A/ and a/ collide too — every pair must be reported.
+    assert!(
+        coll.iter().any(|p| p == Path::new("A/a.txt"))
+            && coll.iter().any(|p| p == Path::new("a/A.txt"))
+            && coll.iter().any(|p| p == Path::new("A"))
+            && coll.iter().any(|p| p == Path::new("a")),
+        "all colliding keys must be reported: {coll:?}"
     );
 }
 
