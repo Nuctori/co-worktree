@@ -1570,8 +1570,9 @@ fn e2e_grandchild_holding_cwd_is_reaped() {
     }
     let (app, id) = seeded_app(&env);
     // The child backgrounds a grandchild that keeps the VIEW cwd, records
-    // its pid inside the view, then exits normally.
-    let script = "cd \"$1\" && (sleep 60 & echo $! > grandchild.pid) && exit 0";
+    // its pid inside the view, then stays alive briefly so the pidfile
+    // window is observable, and exits normally. The grandchild survives it.
+    let script = "cd \"$1\" && (sleep 60 & echo $! > grandchild.pid) && sleep 5 && exit 0";
     let mut run = env.cowt();
     run.args([
         "run",
