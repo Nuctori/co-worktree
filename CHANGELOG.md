@@ -440,6 +440,33 @@ All notable changes to co-worktree are documented here.
 - Regression locks (Linux CI): whiteout case-fold shadow, case-fold
   conflict detection, collision-key and reserved-name detectors.
 
+### Added — round 39 (TOCTOU & concurrency sweep)
+
+- `drop` re-checks the pidfile on EVERY unmount-loop iteration and again
+  right before the rename-to-trash: a `cowt run` started during the wait
+  loop or the (unbounded) trash sweep previously had its live mount
+  unmounted (isolation silently bypassed) or its state dir renamed away
+  while running (run's upper deleted). The upperdir ownership proof
+  cannot distinguish stale from live, so the live-process check is now
+  the gate.
+- `apply` re-checks the run/mount gates immediately before clearing
+  upper, not just after execute: the unbounded final rescan left a window
+  where a freshly started `cowt run`'s early writes were destroyed by the
+  upper reset.
+- `apply` refuses to finalize when the state dir vanished mid-apply
+  (concurrent drop): `create_dir_all(upper)` previously resurrected the
+  dropped worktree as an empty ghost (round-28-06 direction closed).
+- Directory deletes no longer silently skip a non-empty dir: a file
+  created inside a to-be-deleted directory after planning aborts the
+  apply with a TOCTOU error instead of reporting success and losing the
+  deletion intent forever (baseline advanced, upper cleared).
+- `verify_unchanged` content-verifies files when the plan snapshot has a
+  hash: size+mtime can be forged (cp -p / touch -r), and on
+  case-insensitive hosts the path may resolve to a different file than
+  planned — a mismatched file now aborts instead of being silently
+  deleted/overwritten.
+- Regression lock: dir-delete TOCTOU abort (core).
+
 ### Known limitations
 
 - Crash windows with manual-only recovery (round-36, not auto-healed):

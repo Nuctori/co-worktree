@@ -2104,6 +2104,48 @@ fn case_fold_conflicts_detects_case_variant_add() {
     );
 }
 
+/// Round-39-03: a file created inside a plan-to-be-deleted directory AFTER
+/// planning must abort the apply — the old code silently skipped the
+/// non-empty remove_dir, reported success, and the deletion intent was
+/// lost forever (baseline advanced, upper cleared).
+#[test]
+fn dir_delete_toctou_new_child_aborts_execute() {
+    let tmp = TempDir::new().unwrap();
+    let base_dir = tmp.path().join("base");
+    let work_dir = tmp.path().join("work");
+    let host = tmp.path().join("host");
+    for d in [&base_dir, &work_dir, &host] {
+        fs::create_dir_all(d).unwrap();
+    }
+    // base: dir/a ; work: (dir deleted via whiteout) ; host: dir/a.
+    write(&base_dir, "dir/a.txt", "x");
+    write(&host, "dir/a.txt", "x");
+    let base = scan(&base_dir);
+    let current = scan(&host);
+    // Worktree deletes the whole dir: upper holds .wh.dir.
+    let upper = tmp.path().join("upper");
+    fs::create_dir_all(&upper).unwrap();
+    fs::write(upper.join(".wh.dir"), b"").unwrap();
+    let work = overlay::effective_manifest(&base, &upper).unwrap();
+    assert!(
+        work.entries.keys().all(|p| p != Path::new("dir/a.txt")),
+        "whiteout must remove the subtree from work"
+    );
+    let plan = merge::plan(&base, &current, &work, &upper);
+    assert!(plan.is_clean(), "plan must be clean: {:?}", plan.conflicts);
+    // TOCTOU: a new file lands in the dir after planning.
+    write(&host, "dir/b.txt", "late arrival");
+    let res = merge::execute(&plan, &host);
+    assert!(
+        res.is_err(),
+        "new file inside a to-be-deleted dir must abort execute"
+    );
+    assert!(
+        host.join("dir/b.txt").exists(),
+        "the late file must survive the aborted apply"
+    );
+}
+
 /// Round-38-04: manifest keys colliding by case alone are detected by the
 /// pure helper (a Linux manifest read by a Windows cowt must refuse, not
 /// silently drop one key during apply).

@@ -204,6 +204,31 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
     // full scan above already hashed everything; a second full scan would
     // double the I/O on large trees (round-32).
     let new_base = Manifest::rescan(&meta.target, &current)?.manifest;
+    // Round-39-02: the rescan is unbounded — a `cowt run` may have started
+    // after the post-execute gate. Clearing upper now would destroy its
+    // early writes. Re-check immediately before the destructive reset.
+    if State::running_pid(&dir).is_some() || default_backend().is_mounted(&meta.target) {
+        bail!(
+            "worktree '{}' started running while changes were being applied; \
+             NOT advancing the baseline (the running process keeps its upper layer). \
+             Run `cowt apply {}` again after it exits",
+            meta.id,
+            meta.id
+        );
+    }
+    // Round-39-05: a concurrent `drop` may have renamed the state dir away
+    // while we were executing. `create_dir_all(upper)` below would
+    // silently RECREATE it as an empty ghost worktree (round-28-06
+    // resurrection). Verify the dir is still the live worktree before the
+    // destructive finalize.
+    if !dir.join("meta.json").exists() {
+        bail!(
+            "worktree '{}' state was removed during apply (concurrent drop?); \
+             NOT advancing the baseline. The changes are on the host; fork again \
+             if you want to keep them",
+            meta.id
+        );
+    }
     State::write_manifest(&dir, &new_base)?;
     // Reset the layer: applied changes now live in the host. Keeping them
     // in upper would re-display them as pending and make upper-only

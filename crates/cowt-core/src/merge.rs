@@ -488,11 +488,23 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
                         continue;
                     }
                     verify_unchanged(plan, target_root, path)?;
-                    // Only remove if empty; a host-created file inside means
-                    // the dir is in use -> leave it (conservative).
-                    if fs::remove_dir(&dest).is_ok() {
-                        report.deleted += 1;
+                    // A host-created file inside means the dir changed after
+                    // planning — the deletion intent must NOT be silently
+                    // dropped (round-39-03: verify_unchanged only checks the
+                    // dir itself, so a new child is invisible). Fail loudly
+                    // instead of proceeding and losing the intent.
+                    if fs::remove_dir(&dest).is_err() {
+                        return Err(Error::io(
+                            dest.clone(),
+                            std::io::Error::other(format!(
+                                "directory {} is not empty after planning; \
+                                 a new file appeared inside it (TOCTOU). \
+                                 Aborting so the deletion intent is not lost",
+                                dest.display()
+                            )),
+                        ));
                     }
+                    report.deleted += 1;
                 }
                 Ok(_) => {
                     verify_unchanged(plan, target_root, path)?;
@@ -587,6 +599,24 @@ fn commit_rename(staged: &Path, dest: &Path) -> Result<()> {
     do_rename(staged, dest)
 }
 
+/// BLAKE3 content hash of one regular file (round-39-04 verify re-check).
+/// `None` on any I/O error — a readable file is expected here, so a read
+/// failure is treated as "cannot verify" (abort, not trust).
+fn hash_file(path: &Path) -> Option<String> {
+    use std::io::Read;
+    let mut f = fs::File::open(path).ok()?;
+    let mut hasher = blake3::Hasher::new();
+    let mut buf = [0u8; 65536];
+    loop {
+        let n = f.read(&mut buf).ok()?;
+        if n == 0 {
+            break;
+        }
+        hasher.update(&buf[..n]);
+    }
+    Some(hasher.finalize().to_hex().to_string())
+}
+
 /// Round-24 TOCTOU guard: verify the on-disk path still matches what the
 /// planner observed in `current`. A host edit landing between planning and
 /// execution must abort the apply (never silently overwrite the fresh host
@@ -644,6 +674,15 @@ fn verify_unchanged(plan: &MergePlan, target_root: &Path, rel: &Path) -> Result<
                 && mode_ok
                 && meta.len() == expected.size
                 && mtime_ns == expected.mtime_ns
+                // Round-39-04: size+mtime can be forged (cp -p, touch -r)
+                // and on case-insensitive hosts the path may even resolve
+                // to a DIFFERENT file than planned (case-variant sibling,
+                // NTFS/APFS). When the plan snapshot carries a content
+                // hash, verify it — a mismatched file must abort the
+                // apply instead of being silently deleted/overwritten.
+                && expected.hash.as_deref().is_none_or(|h| {
+                    hash_file(&dest).map(|actual| actual == *h).unwrap_or(false)
+                })
         }
         EntryKind::Dir => meta.is_dir(),
         EntryKind::Symlink => {

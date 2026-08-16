@@ -84,6 +84,21 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
         // proof appearing is the mount declared foreign.
         let mut proved_ours = false;
         for _ in 0..30 {
+            // Round-39: a `cowt run` may have started since the initial
+            // check — never unmount a mount a LIVE process holds. The
+            // upperdir ownership proof cannot distinguish stale from live,
+            // so the pidfile must be re-checked every iteration.
+            if let Some(pid) = State::running_pid(&dir) {
+                if !args.force {
+                    bail!(
+                        "worktree '{}' has a running process (pid {pid}); \
+                         refusing to drop. Stop it or use --force.",
+                        meta.id
+                    );
+                }
+                eprintln!("cowt: --force: terminating pid {pid}");
+                terminate(pid)?;
+            }
             if !backend.is_mounted(&meta.target) {
                 break;
             }
@@ -170,6 +185,55 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
         }
     }
     // Re-check after the sweep, immediately before the rename (round-31).
+    // Round-39: the sweep is unbounded — a `cowt run` may have started
+    // during it. Never rename a state dir a live process holds, and never
+    // rename while a mount is up: terminate first, then dismount any
+    // now-stale mount.
+    if let Some(pid) = State::running_pid(&dir) {
+        if !args.force {
+            bail!(
+                "worktree '{}' has a running process (pid {pid}); \
+                 refusing to drop. Stop it or use --force.",
+                meta.id
+            );
+        }
+        eprintln!("cowt: --force: terminating pid {pid}");
+        terminate(pid)?;
+    }
+    if target_known && backend.is_mounted(&meta.target) {
+        let own_leftover = State::stale_run(&dir)
+            || dir.join("real").exists()
+            || crate::backend::mount_upper_proves_ours(&meta.target, &dir);
+        let ours = mount_is_ours(&meta.target);
+        if own_leftover && ours {
+            if !args.force {
+                bail!(
+                    "{} is still mounted; refusing to drop. Unmount it or use --force.",
+                    meta.target.display()
+                );
+            }
+            eprintln!(
+                "cowt: --force: unmounting {}",
+                crate::state::sanitize_display(&meta.target.display().to_string())
+            );
+            let _ = backend.unmount(&meta.target);
+            // A failed unmount leaves the mount up: the rename would move
+            // the state dir from under a live mount. Refuse rather than
+            // corrupt the run.
+            if backend.is_mounted(&meta.target) {
+                bail!(
+                    "{} is still mounted after the unmount attempt; refusing to drop. \
+                     Unmount it manually first",
+                    meta.target.display()
+                );
+            }
+        } else {
+            bail!(
+                "{} is mounted by something else (not a cowt leftover); refusing to unmount it",
+                meta.target.display()
+            );
+        }
+    }
     if dir.join("real").exists() {
         bail!(
             "the host directory is still moved aside at {}; refusing to delete it. \
