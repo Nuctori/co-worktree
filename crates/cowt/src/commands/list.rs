@@ -29,10 +29,10 @@ pub fn list(json_out: bool) -> Result<()> {
         let status = effective_status(&state, m);
         println!(
             "{:<10} {:<20} {:<9} {:<9} {}",
-            m.id,
+            crate::state::sanitize_display(&m.id),
             crate::state::sanitize_display(&m.name.clone().unwrap_or_else(|| "-".into())),
             status,
-            m.backend,
+            crate::state::sanitize_display(&m.backend),
             crate::state::sanitize_display(&m.target.display().to_string())
         );
     }
@@ -44,7 +44,16 @@ pub fn status(id: &str, json_out: bool) -> Result<()> {
     let dir = state.resolve(id)?;
     let meta = State::load_meta(&dir)?;
     let running = State::running_pid(&dir);
-    let upper_size = dir_size(&dir.join("upper")).unwrap_or(0);
+    // Distinguish "upper is genuinely empty" from "upper is broken or
+    // unreadable": a 0-byte lie would hide corruption from scripts
+    // (round-33).
+    let upper_size = match dir_size(&dir.join("upper")) {
+        Ok(sz) => Some(sz),
+        Err(e) => {
+            eprintln!("cowt: warning: cannot measure upper layer: {e:#}",);
+            None
+        }
+    };
     let info = json!({
         "id": meta.id,
         "name": meta.name,
@@ -59,7 +68,7 @@ pub fn status(id: &str, json_out: bool) -> Result<()> {
     if json_out {
         println!("{}", serde_json::to_string_pretty(&info)?);
     } else {
-        println!("id:        {}", meta.id);
+        println!("id:        {}", crate::state::sanitize_display(&meta.id));
         if let Some(n) = &meta.name {
             println!("name:      {}", crate::state::sanitize_display(n));
         }
@@ -67,12 +76,22 @@ pub fn status(id: &str, json_out: bool) -> Result<()> {
             "target:    {}",
             crate::state::sanitize_display(&meta.target.display().to_string())
         );
+        println!(
+            "created:   {}",
+            crate::state::sanitize_display(&meta.created_epoch.to_string())
+        );
         println!("status:    {}", effective_status(&state, &meta));
-        println!("backend:   {}", meta.backend);
+        println!(
+            "backend:   {}",
+            crate::state::sanitize_display(&meta.backend)
+        );
         if let Some(pid) = running {
             println!("running:   pid {pid}");
         }
-        println!("upper:     {} bytes of isolated data", upper_size);
+        match upper_size {
+            Some(sz) => println!("upper:     {sz} bytes of isolated data"),
+            None => println!("upper:     unknown (unreadable)"),
+        }
         println!(
             "state:     {}",
             crate::state::sanitize_display(&dir.display().to_string())

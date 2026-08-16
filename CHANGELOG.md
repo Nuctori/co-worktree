@@ -301,6 +301,28 @@ All notable changes to co-worktree are documented here.
 - Regression locks: ~1900-level deep tree scan (fd bounded); 96MB file
   streaming hash; 5k-entry × 800-whiteout fold stays fast.
 
+### Added — round 33 (list/status/doctor output contracts)
+
+- `list` ordering is deterministic: created_epoch first, id as tie-break —
+  same-second worktrees no longer fall back to filesystem read_dir order.
+- `status` distinguishes an unreadable upper layer from an empty one:
+  "unknown (unreadable)" in human output and `upper_bytes: null` in JSON,
+  instead of a fabricated 0.
+- `.trash-*` names are refused by `resolve` (direct id lookup could
+  previously resurrect a drop leftover as a ghost worktree in `status`).
+- `status` human output now includes the `created:` line, matching the
+  JSON schema.
+- `fork --name` rejects control characters (newline/tab/ESC) — a hostile
+  label can no longer break the one-worktree-per-line output contract or
+  inject terminal escapes.
+- `list`/`status` sanitize `id` and `backend` fields too — a forged
+  meta.json backend could previously leak raw ANSI to the terminal.
+- Removed duplicated filter blocks and a dead binding in `state.rs`
+  (list/resolve).
+- Regression locks: deterministic ordering, control-char name rejection,
+  trash-name refusal, created line parity, sanitization, upper
+  unreadability.
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX

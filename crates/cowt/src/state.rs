@@ -140,7 +140,11 @@ impl State {
         if !valid_id_or_name(id_or_name) {
             bail!("invalid worktree id or name '{id_or_name}'");
         }
-        let _direct = self.dir(id_or_name);
+        // A `.trash-*` name is a drop leftover, never a live worktree —
+        // direct id lookup must not resurrect it (round-33).
+        if id_or_name.starts_with(".trash-") {
+            bail!("invalid worktree id or name '{id_or_name}'");
+        }
         let direct = self.dir(id_or_name);
         // A worktree-shaped directory (meta.json present, or a half-created
         // fork: manifest.json already written) resolves by id even when
@@ -157,7 +161,6 @@ impl State {
         if direct.is_dir() && (direct.join("upper").is_dir() || direct.join("work").is_dir()) {
             return Ok(direct);
         }
-        // Try name lookup.
         // Try name lookup.
         let mut hits = Vec::new();
         for meta in self.list()? {
@@ -204,14 +207,6 @@ impl State {
             if entry.file_name().to_string_lossy().starts_with(".trash-") {
                 continue;
             }
-            if !dir.is_dir() || !dir.join("meta.json").exists() {
-                continue;
-            }
-            // A `.trash-*` rename-aside from a failed `drop` is not a
-            // worktree; hide it from list/resolve so no ghost entries.
-            if entry.file_name().to_string_lossy().starts_with(".trash-") {
-                continue;
-            }
             match Self::load_meta(&dir) {
                 Ok(meta) => out.push(meta),
                 // Round-23: a corrupt meta.json must not be silently hidden
@@ -223,7 +218,10 @@ impl State {
                 ),
             }
         }
-        out.sort_by_key(|a| a.created_epoch);
+        // Deterministic order: created_epoch first, id as tie-break (the
+        // epoch is second-granular, so same-second worktrees otherwise fall
+        // back to filesystem read_dir order — round-33).
+        out.sort_by(|a, b| (a.created_epoch, &a.id).cmp(&(b.created_epoch, &b.id)));
         Ok(out)
     }
 
@@ -337,6 +335,10 @@ pub fn valid_id_or_name(s: &str) -> bool {
         && !s.contains('/')
         && !s.contains('\\')
         && !s.contains("..")
+        // Control characters (newline/tab/ESC...) would break the
+        // one-worktree-per-line output contract and allow terminal
+        // injection through a user-chosen label (round-33).
+        && !s.chars().any(|c| c.is_control())
 }
 
 /// Atomic file write: temp file + rename (same filesystem). A kill -9

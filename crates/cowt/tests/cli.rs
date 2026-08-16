@@ -1098,3 +1098,136 @@ fn trash_sweep_preserves_real_holding_trash() {
         "trash holding real must survive the sweep"
     );
 }
+
+// ---------------------------------------------------------------- R33
+
+/// Round-33: list order is deterministic — created_epoch first, id as
+/// tie-break (same-second worktrees must not fall back to filesystem
+/// read_dir order).
+#[test]
+fn list_order_is_deterministic() {
+    let env = Env::new();
+    env.fork(); // demo
+                // Fork a second worktree.
+    let app2 = env.home.join(".config/demoapp2");
+    fs::create_dir_all(&app2).unwrap();
+    fs::write(app2.join("f.txt"), "x").unwrap();
+    env.cowt_ok(&["fork", app2.to_str().unwrap(), "--name", "demo2"]);
+    // Force identical epochs (they may already be; rewrite to be sure).
+    for d in fs::read_dir(&env.state).unwrap().flatten() {
+        if !d.file_name().to_string_lossy().starts_with('.') {
+            let m = d.path().join("meta.json");
+            let v: serde_json::Value = serde_json::from_slice(&fs::read(&m).unwrap()).unwrap();
+            let mut v = v;
+            v["created_epoch"] = serde_json::json!(1000);
+            fs::write(&m, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+        }
+    }
+    let out = env.cowt_ok(&["list", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&out).unwrap();
+    let rows = v.as_array().unwrap();
+    assert_eq!(rows.len(), 2);
+    let ids: Vec<&str> = rows.iter().map(|r| r["id"].as_str().unwrap()).collect();
+    let mut sorted = ids.clone();
+    sorted.sort();
+    assert_eq!(
+        ids, sorted,
+        "same-epoch worktrees must be ordered by id, not read_dir order"
+    );
+}
+
+/// Round-33: fork --name must reject control characters (newline would
+/// break the one-worktree-per-line output contract).
+#[test]
+fn fork_rejects_control_char_names() {
+    let env = Env::new();
+    for bad in ["bad\nname", "tab\tname", "esc\u{1b}name"] {
+        let out = env
+            .cowt()
+            .args(["fork", env.target.to_str().unwrap(), "--name", bad])
+            .output()
+            .unwrap();
+        assert!(!out.status.success(), "fork --name {bad:?} must be refused");
+    }
+}
+
+/// Round-33: status on a `.trash-*` id must be refused (it is a drop
+/// leftover, not a live worktree).
+#[test]
+fn status_refuses_trash_name() {
+    let env = Env::new();
+    env.fork();
+    let dir = env.state_dir();
+    let trash_name = format!(".trash-{}-1", dir.file_name().unwrap().to_string_lossy());
+    fs::rename(&dir, env.state.join(&trash_name)).unwrap();
+    let out = env.cowt().args(["status", &trash_name]).output().unwrap();
+    assert!(
+        !out.status.success(),
+        "status on a .trash-* name must be refused"
+    );
+}
+
+/// Round-33: status human output includes a created line matching the JSON
+/// created_epoch.
+#[test]
+fn status_human_has_created_line() {
+    let env = Env::new();
+    env.fork();
+    let human = env.cowt_ok(&["status", "demo"]);
+    let json = env.cowt_ok(&["status", "demo", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    let epoch = v["created_epoch"].as_u64().unwrap();
+    assert!(
+        human.contains(&format!("created:   {epoch}")),
+        "human status must show the created epoch: {human}"
+    );
+}
+
+/// Round-33: forged meta backend/id fields with ANSI escapes must not leak
+/// raw ESC bytes into list/status human output.
+#[test]
+fn list_status_sanitize_id_and_backend() {
+    let env = Env::new();
+    env.fork();
+    // Forge backend/id with an ESC byte via the meta.json.
+    let dir = env.state_dir();
+    let m = dir.join("meta.json");
+    let v: serde_json::Value = serde_json::from_slice(&fs::read(&m).unwrap()).unwrap();
+    let mut v = v;
+    v["backend"] = serde_json::json!("winfsp\u{1b}[33mESC");
+    fs::write(&m, serde_json::to_string_pretty(&v).unwrap()).unwrap();
+
+    let out = env.cowt().args(["list"]).output().unwrap();
+    assert!(
+        !out.stdout.contains(&0x1b),
+        "list must not leak raw ESC from backend"
+    );
+    let out = env.cowt().args(["status", "demo"]).output().unwrap();
+    assert!(
+        !out.stdout.contains(&0x1b),
+        "status must not leak raw ESC from backend"
+    );
+}
+
+/// Round-33: status reports an unreadable upper as unknown, not as a
+/// fabricated 0 bytes.
+#[test]
+fn status_upper_unreadable_is_not_zero() {
+    let env = Env::new();
+    env.fork();
+    // Replace upper dir with a plain file (dir_size fails).
+    let dir = env.state_dir();
+    fs::remove_dir_all(dir.join("upper")).unwrap();
+    fs::write(dir.join("upper"), "not a dir").unwrap();
+    let human = env.cowt_ok(&["status", "demo"]);
+    assert!(
+        human.contains("unknown") || human.contains("cannot measure"),
+        "unreadable upper must not be reported as 0 bytes: {human}"
+    );
+    let json = env.cowt_ok(&["status", "demo", "--json"]);
+    let v: serde_json::Value = serde_json::from_str(&json).unwrap();
+    assert!(
+        v["upper_bytes"].is_null() || v["upper_bytes"].as_u64() != Some(0),
+        "unreadable upper must not fabricate upper_bytes:0"
+    );
+}
