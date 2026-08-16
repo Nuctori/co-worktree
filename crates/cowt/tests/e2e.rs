@@ -150,6 +150,18 @@ fn wait_run_gone(env: &Env, child: &mut Child, id: &str) {
     }
 }
 
+/// Liveness probe via `kill -0` (integration tests cannot reach the
+/// crate-internal `pid_alive`). Linux-only: used by the grandchild-reaping
+/// e2e.
+#[cfg(target_os = "linux")]
+fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 /// The "app" being isolated — the helper binary.
 fn require_backend(env: &Env) -> bool {
     let out = env.cowt().arg("doctor").output().unwrap();
@@ -1539,6 +1551,66 @@ fn e2e_wh_prefix_rename_refused() {
     assert!(
         !app.join(".wh.victim.txt").exists(),
         "refused rename target must never land on the host"
+    );
+    env.cowt_ok(&["drop", &id]);
+}
+
+/// Round-26 coverage lock (Linux): a backgrounded GRANDCHILD holding the
+/// view's cwd must be reaped by the group kill when the run exits —
+/// otherwise the unmount fails with EBUSY, the run reports "still
+/// mounted", and the worktree is stuck. This is the exact scenario the
+/// starttime identity guard (round-40) protects.
+#[cfg(target_os = "linux")]
+#[test]
+#[ignore = "real backend (mount) required"]
+fn e2e_grandchild_holding_cwd_is_reaped() {
+    let env = Env::new();
+    if !require_backend(&env) {
+        return;
+    }
+    let (app, id) = seeded_app(&env);
+    // The child backgrounds a grandchild that keeps the VIEW cwd, records
+    // its pid inside the view, then exits normally.
+    let script = "cd \"$1\" && (sleep 60 & echo $! > grandchild.pid) && exit 0";
+    let mut run = env.cowt();
+    run.args([
+        "run",
+        &id,
+        "--",
+        "sh",
+        "-c",
+        script,
+        "sh",
+        app.to_str().unwrap(),
+    ]);
+    let mut child = run.spawn().unwrap();
+    env.wait_for_run();
+    wait_run(&mut child);
+    assert_mount_gone(&app);
+
+    // The grandchild's pid was recorded through the view -> it landed in
+    // upper. The group kill must have terminated it.
+    let gp = env.upper_of(&id).join("grandchild.pid");
+    let text = match fs::read_to_string(&gp) {
+        Ok(t) => t,
+        Err(_) => {
+            // The view write may be materialized lazily; retry briefly.
+            let deadline = Instant::now() + Duration::from_secs(10);
+            let mut found = None;
+            while Instant::now() < deadline {
+                if let Ok(t) = fs::read_to_string(&gp) {
+                    found = Some(t);
+                    break;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            found.expect("grandchild pid must be recorded in upper")
+        }
+    };
+    let gpid: u32 = text.trim().parse().expect("grandchild pid parses");
+    assert!(
+        !pid_alive(gpid),
+        "grandchild holding the view cwd must be reaped by the group kill"
     );
     env.cowt_ok(&["drop", &id]);
 }

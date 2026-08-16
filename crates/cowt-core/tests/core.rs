@@ -2250,3 +2250,114 @@ fn windows_inexpressible_keys_detected() {
         "normal names must pass: {bad:?}"
     );
 }
+
+/// Round-24/39 coverage locks: verify_unchanged's three abort branches.
+/// Host changes landing between planning and execution must abort the
+/// apply — silent overwrite/deletion of fresh host data is forbidden.
+/// A host file DELETED after planning must abort (WriteFile/Delete target
+/// vanished).
+/// A host file DELETED after planning must abort (WriteFile/Delete target
+/// vanished).
+#[test]
+fn verify_unchanged_aborts_on_disappeared_host_file() {
+    let tmp = TempDir::new().unwrap();
+    let base_dir = tmp.path().join("base");
+    let work_dir = tmp.path().join("work");
+    let host = tmp.path().join("host");
+    for d in [&base_dir, &work_dir, &host] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base_dir, "f.txt", "v1");
+    write(&host, "f.txt", "v1");
+    write(&work_dir, "f.txt", "v2"); // worktree modified -> WriteFile op
+    let base = scan(&base_dir);
+    let current = scan(&host);
+    let work = scan(&work_dir);
+    let plan = merge::plan(&base, &current, &work, &tmp.path().join("upper"));
+    assert!(plan.is_clean());
+    // Host deletes the file after planning.
+    fs::remove_file(host.join("f.txt")).unwrap();
+    let res = merge::execute(&plan, &host);
+    assert!(res.is_err(), "disappeared host file must abort execute");
+}
+
+/// A host file APPEARING after planning (not in the plan-time snapshot)
+/// must abort — the write would clobber it.
+#[test]
+fn verify_unchanged_aborts_on_new_host_file() {
+    let tmp = TempDir::new().unwrap();
+    let base_dir = tmp.path().join("base");
+    let work_dir = tmp.path().join("work");
+    let host = tmp.path().join("host");
+    for d in [&base_dir, &work_dir, &host] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base_dir, "f.txt", "v1");
+    write(&host, "f.txt", "v1");
+    write(&work_dir, "f.txt", "v2"); // modified in the worktree
+    write(&work_dir, "new.txt", "added"); // worktree-added, absent from current
+    let base = scan(&base_dir);
+    let current = scan(&host);
+    let work = scan(&work_dir);
+    let plan = merge::plan(&base, &current, &work, &tmp.path().join("upper"));
+    assert!(plan.is_clean());
+    // The host creates the planned-new path after planning.
+    write(&host, "new.txt", "late user file");
+    let res = merge::execute(&plan, &host);
+    assert!(
+        res.is_err(),
+        "a host file at a planned-write path must abort (appeared-branch)"
+    );
+    assert_eq!(
+        fs::read_to_string(host.join("new.txt")).unwrap(),
+        "late user file",
+        "the late host file must survive"
+    );
+}
+
+/// A host file REWRITTEN after planning with forged size+mtime (cp -p /
+/// touch -r) must still abort — verify_unchanged's content-hash re-check
+/// (round-39-04) catches what metadata cannot.
+#[test]
+fn verify_unchanged_hash_catches_forged_metadata() {
+    let tmp = TempDir::new().unwrap();
+    let base_dir = tmp.path().join("base");
+    let host = tmp.path().join("host");
+    for d in [&base_dir, &host] {
+        fs::create_dir_all(d).unwrap();
+    }
+    write(&base_dir, "f.txt", "original-content");
+    write(&host, "f.txt", "original-content");
+    let base = scan(&base_dir);
+    let current = scan(&host);
+    // Plan deletes f.txt (worktree deleted it) — the Delete op's verify
+    // reads the host file's metadata and (round-39-04) its hash.
+    let upper = tmp.path().join("upper");
+    fs::create_dir_all(&upper).unwrap();
+    fs::write(upper.join(".wh.f.txt"), b"").unwrap();
+    let work = overlay::effective_manifest(&base, &upper).unwrap();
+    let plan = merge::plan(&base, &current, &work, &upper);
+    assert!(plan.is_clean());
+    // Host replaces f.txt with DIFFERENT content, then forges size+mtime
+    // to match the plan snapshot exactly (cp -p style).
+    write(&host, "f.txt", "attacker-content-same-length");
+    let forged = "attacker-content"; // same length as original (16)
+    write(&host, "f.txt", forged);
+    let orig_len = base.get(Path::new("f.txt")).unwrap().size;
+    assert_eq!(orig_len, forged.len() as u64, "fixture must be same-size");
+    // Forge mtime to the snapshot's value.
+    let orig_mtime = base.get(Path::new("f.txt")).unwrap().mtime_ns;
+    let mt = std::time::UNIX_EPOCH + std::time::Duration::from_nanos(orig_mtime as u64);
+    let ft = filetime::FileTime::from_system_time(mt);
+    filetime::set_file_mtime(host.join("f.txt"), ft).unwrap();
+    let res = merge::execute(&plan, &host);
+    assert!(
+        res.is_err(),
+        "content changed with forged metadata must abort (hash re-check)"
+    );
+    assert_eq!(
+        fs::read_to_string(host.join("f.txt")).unwrap(),
+        forged,
+        "the host file must survive the aborted apply"
+    );
+}

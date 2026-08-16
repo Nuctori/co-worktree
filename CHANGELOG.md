@@ -512,6 +512,28 @@ All notable changes to co-worktree are documented here.
   touched.
 - Regression locks: staging-marker sweep semantics (state unit).
 
+### Added — coverage hardening (post-series)
+
+- Coverage baseline measured (cargo llvm-cov): cowt-core 67-89% lines
+  (diff 91%, merge 87%, manifest 77-89%, overlay 70%). Commands/state
+  layers run via spawned-binary integration tests whose subprocess
+  coverage is not collected on Windows — measured 0% there is a tooling
+  limit, not a test gap (41 CLI + 22 E2E tests execute every command).
+- Property tests (proptest, cowt-core): case-fold comparison is an
+  equivalence relation with the fold key as canonical fingerprint; case
+  collision detection reports exactly the keys that have a partner;
+  Windows reserved-name validation catches exactly the reserved
+  components; `effective_manifest_fold` is idempotent and never yields
+  case-colliding keys.
+- verify_unchanged branch locks: host file deleted after planning
+  (disappeared), host file appearing at a planned-write path (appeared),
+  and content rewritten with forged size+mtime (cp -p style) — all abort
+  the apply and preserve the host file (round-39-04 hash re-check now
+  directly locked).
+- Linux e2e: a backgrounded grandchild holding the view cwd is reaped by
+  the group kill when the run exits (round-26 scenario, now covered
+  end-to-end on CI).
+
 ### Known limitations
 
 - Crash windows with manual-only recovery (round-36, not auto-healed):
