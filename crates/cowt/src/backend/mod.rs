@@ -588,10 +588,28 @@ pub fn unmount_best_effort(mountpoint: &Path) -> Result<()> {
 /// Shared stale-mount gate for `run` / `diff` / `apply`.
 ///
 /// A mount at `target` is only ever torn down when the worktree's own
-/// pidfile proves a previous `cowt run` died (crashed or killed), or when
-/// the moved-aside `real` dir exists (the kill-window crash case where the
-/// pidfile was never written): either makes the mount ours by construction.
-/// Anything else — a live run that has not written its pidfile yet, or a
+/// pidfile proves a previous `cowt run` died (crashed or killed), when the
+/// moved-aside `real` dir exists (the kill-window crash case where the
+/// pidfile was never written), or when the mount options name this
+/// worktree's upper layer (round-36: kill -9 between mount success and
+/// pidfile write leaves a live mount with no pidfile and no real dir).
+/// Either way the mount is ours by construction — anything else is treated
+/// as a foreign mount.
+pub fn mount_upper_proves_ours(target: &Path, dir: &Path) -> bool {
+    #[cfg(target_os = "linux")]
+    {
+        crate::backend::linux::mount_upper_matches_proc(target, &dir.join("upper"))
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = (target, dir);
+        false
+    }
+}
+
+/// Clean up a mount left by an interrupted `cowt run` (or clear the way to
+/// mount over it). If the mount carries no proof of being ours (no stale
+/// pidfile, no real dir, no matching upperdir option) it is treated as a
 /// foreign mount (manual mount, another tool) — refuses, preserving the
 /// original "already a mountpoint" semantics.
 ///
@@ -604,7 +622,9 @@ pub fn recover_stale_mount(
     if !backend.is_mounted(target) {
         return Ok(false);
     }
-    let own_leftover = crate::state::State::stale_run(dir) || dir.join("real").exists();
+    let own_leftover = crate::state::State::stale_run(dir)
+        || dir.join("real").exists()
+        || mount_upper_proves_ours(target, dir);
     if own_leftover {
         eprintln!("cowt: removing stale mount at {}", target.display());
         backend.unmount(target)?;

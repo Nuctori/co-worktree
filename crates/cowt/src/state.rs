@@ -393,8 +393,61 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             .map(|d| d.as_nanos())
             .unwrap_or(0)
     ));
+    // Sweep stale tmp files from previous crashed writers before writing a
+    // fresh one (round-36): a kill -9 between write and rename leaves
+    // *.json.tmp-<pid>-<nanos> behind forever otherwise. Only sweep the
+    // current directory's own json.tmp-* pattern, and never a live
+    // concurrent writer's file (pid-based liveness check; ours is always
+    // the just-written one).
+    let dir = path.parent().unwrap_or_else(|| std::path::Path::new("."));
+    if let Ok(rd) = std::fs::read_dir(dir) {
+        for e in rd.flatten() {
+            let name = e.file_name().to_string_lossy().into_owned();
+            let Some(idx) = name.find("json.tmp-") else {
+                continue;
+            };
+            let Some(pid) = name[idx + "json.tmp-".len()..]
+                .split('-')
+                .next()
+                .and_then(|p| p.parse::<u32>().ok())
+            else {
+                continue;
+            };
+            if pid == std::process::id() {
+                continue; // ours (or a concurrent writer from this process — none)
+            }
+            if pid_alive(pid) {
+                continue; // live concurrent writer
+            }
+            let _ = std::fs::remove_file(dir.join(&name));
+        }
+    }
     std::fs::write(&tmp, bytes)?;
     std::fs::rename(&tmp, path)
+}
+
+/// Sweep stale `.cowt-apply-<pid>-<nanos>` staging dirs from a crashed
+/// `cowt apply` in `parent` (round-36). Only dirs whose pid is dead are
+/// removed — a live concurrent apply keeps its staging area.
+pub fn sweep_stale_staging(parent: &std::path::Path) {
+    let Ok(rd) = std::fs::read_dir(parent) else {
+        return;
+    };
+    for e in rd.flatten() {
+        let name = e.file_name().to_string_lossy().into_owned();
+        let Some(rest) = name.strip_prefix(".cowt-apply-") else {
+            continue;
+        };
+        let Some(pid) = rest.split('-').next().and_then(|p| p.parse::<u32>().ok()) else {
+            continue;
+        };
+        if pid_alive(pid) {
+            continue; // live concurrent apply
+        }
+        if e.path().is_dir() {
+            let _ = std::fs::remove_dir_all(e.path());
+        }
+    }
 }
 
 /// Generate a short random id (16 hex chars = 64 bits) from /dev/urandom,
@@ -623,5 +676,54 @@ mod tests {
             r#"{"id":"abc","target":"/x","created_epoch":0,"status":"ready","backend":"test"}"#;
         let m: WorktreeMeta = serde_json::from_str(noname).unwrap();
         assert_eq!(m.name, None);
+    }
+
+    /// Round-36: atomic_write sweeps stale `*.json.tmp-<pid>-<nanos>`
+    /// residue from crashed writers (kill -9 between write and rename),
+    /// but never a live process's temp file.
+    #[test]
+    fn atomic_write_sweeps_stale_tmp_but_keeps_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("manifest.json");
+        // Stale residue (dead pid 999999999) and a "live" residue (our own
+        // pid — treated as live concurrent writer, kept).
+        fs::write(tmp.path().join("manifest.json.tmp-999999999-1"), b"stale").unwrap();
+        fs::write(
+            tmp.path()
+                .join(format!("manifest.json.tmp-{}-1", std::process::id())),
+            b"live",
+        )
+        .unwrap();
+        atomic_write(&path, b"fresh").unwrap();
+        assert_eq!(fs::read(&path).unwrap(), b"fresh");
+        assert!(
+            !tmp.path().join("manifest.json.tmp-999999999-1").exists(),
+            "stale residue must be swept"
+        );
+        assert!(
+            tmp.path()
+                .join(format!("manifest.json.tmp-{}-1", std::process::id()))
+                .exists(),
+            "live residue must be kept"
+        );
+    }
+
+    /// Round-36: sweep_stale_staging removes `.cowt-apply-*` dirs whose pid
+    /// is dead, and keeps live ones (a concurrent apply's staging area).
+    #[test]
+    fn sweep_stale_staging_removes_dead_keeps_live() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dead = tmp.path().join(".cowt-apply-999999999-1");
+        let live = tmp
+            .path()
+            .join(format!(".cowt-apply-{}-1", std::process::id()));
+        let other = tmp.path().join("real-user-dir");
+        for d in [&dead, &live, &other] {
+            fs::create_dir_all(d).unwrap();
+        }
+        sweep_stale_staging(tmp.path());
+        assert!(!dead.exists(), "dead staging dir must be swept");
+        assert!(live.exists(), "live staging dir must be kept");
+        assert!(other.exists(), "non-staging dirs must never be touched");
     }
 }

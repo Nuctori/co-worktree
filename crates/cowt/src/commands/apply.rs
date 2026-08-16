@@ -17,6 +17,15 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
     let state = State::open()?;
     let dir = state.resolve(&args.id)?;
     let meta = State::load_meta(&dir)?;
+    // Round-36: a kill -9 inside a previous apply's staging phase leaves
+    // .cowt-apply-<pid>-<nanos>/ behind in the target's parent. Sweep
+    // stale ones (dead pid) before staging a fresh apply, so crashes do
+    // not accumulate unbounded copies of staged files.
+    let parent = meta
+        .target
+        .parent()
+        .unwrap_or_else(|| std::path::Path::new("."));
+    crate::state::sweep_stale_staging(parent);
     if State::running_pid(&dir).is_some() {
         bail!(
             "worktree '{}' is running; apply after the process exits",

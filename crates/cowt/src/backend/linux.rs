@@ -489,3 +489,25 @@ pub fn mount_is_ours_proc(mountpoint: &Path) -> bool {
                 || device.starts_with("fuse.overlayfs"))
     })
 }
+
+/// Whether the mount at `mountpoint` carries `upperdir=<upper>` in its
+/// options (4th /proc/self/mounts field). Round-36: a kill -9 between the
+/// mount succeeding and the pidfile being written leaves a live mount with
+/// NO pidfile and NO real dir — the only remaining ownership proof is the
+/// upperdir option naming this worktree's upper layer.
+pub fn mount_upper_matches_proc(mountpoint: &Path, upper: &Path) -> bool {
+    let target = mountpoint.to_string_lossy().replace(' ', "\\040");
+    let want = format!("upperdir={}", upper.to_string_lossy().replace(' ', "\\040"));
+    let Ok(mounts) = std::fs::read_to_string("/proc/self/mounts") else {
+        return false;
+    };
+    mounts.lines().any(|line| {
+        let mut fields = line.split_whitespace();
+        fields.next(); // device
+        if fields.next() != Some(target.as_str()) {
+            return false;
+        }
+        let options = fields.next().unwrap_or("");
+        options.split(',').any(|o| o == want)
+    })
+}

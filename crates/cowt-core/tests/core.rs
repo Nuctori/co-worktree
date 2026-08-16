@@ -1967,3 +1967,63 @@ fn manifest_round_trip_full_entries() {
         assert_eq!(e1.kind, e2.kind);
     }
 }
+
+/// Round-36: a kill -9 between copy_up's fs::copy and fs::rename strands
+/// `.cowt-copy-tmp.<name>` in upper. It must NEVER surface as a worktree
+/// entry (ghost Added in diff, garbage write into the host by apply).
+#[test]
+fn copy_tmp_residue_is_invisible_to_effective_manifest() {
+    let tmp = TempDir::new().unwrap();
+    let base = tmp.path().join("base");
+    let upper = tmp.path().join("upper");
+    fs::create_dir_all(&base).unwrap();
+    fs::create_dir_all(&upper).unwrap();
+    write(&base, "big.bin", "host data");
+    // Simulate the crash residue of a copy_up for `big.bin` (round-36
+    // naming: `.cowt-copy-tmp.big.bin`), plus a legacy `.tmp` residue.
+    write(&upper, ".cowt-copy-tmp.big.bin", "torn copy");
+    write(&upper, "legacy.tmp", "legacy crash residue");
+
+    let eff = overlay::effective_manifest(&scan(&base), &upper).unwrap();
+    assert!(
+        !eff.entries
+            .contains_key(Path::new(".cowt-copy-tmp.big.bin")),
+        "reserved copy-tmp namespace must be filtered: {:?}",
+        eff.entries.keys().collect::<Vec<_>>()
+    );
+    // `big.bin` itself must still be the base version (upper holds no
+    // finished copy of it).
+    assert_eq!(eff.get(Path::new("big.bin")).map(|e| e.size), Some(9));
+    // A plain user file named *.tmp is NOT filtered (legacy residue is a
+    // user-visible file by definition; only the reserved prefix is ours).
+    assert!(
+        eff.entries.contains_key(Path::new("legacy.tmp")),
+        "unprefixed user files must stay visible"
+    );
+
+    // The residue must not generate a write op in the apply plan either.
+    let host = tmp.path().join("host");
+    fs::create_dir_all(&host).unwrap();
+    write(&host, "big.bin", "host data");
+    let plan = merge::plan(&scan(&base), &scan(&host), &eff, &upper);
+    assert!(
+        plan.is_clean(),
+        "copy-tmp residue must not create plan ops: {:?}",
+        plan.conflicts
+    );
+    fn op_path(op: &merge::Operation) -> &Path {
+        match op {
+            merge::Operation::WriteFile { path, .. }
+            | merge::Operation::WriteSymlink { path, .. }
+            | merge::Operation::Mkdir { path, .. }
+            | merge::Operation::Delete { path, .. } => path,
+        }
+    }
+    for op in &plan.operations {
+        assert!(
+            !op_path(op).starts_with(".cowt-copy-tmp."),
+            "plan must not write the residue: {}",
+            op_path(op).display()
+        );
+    }
+}

@@ -18,6 +18,10 @@ use crate::manifest::{Entry, EntryKind, Manifest};
 
 const WHITEOUT_PREFIX: &str = ".wh.";
 const OPAQUE_MARKER: &str = ".wh..wh..opq";
+/// Reserved namespace for winfsp/macos copy_up temp files: a crash between
+/// the copy and the rename leaves `.cowt-copy-tmp.<name>` in upper; it must
+/// never surface as a worktree entry (round-36).
+const COPY_TMP_PREFIX: &str = ".cowt-copy-tmp.";
 
 /// Fold `upper` into `base`, producing the effective worktree manifest.
 ///
@@ -105,14 +109,21 @@ pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
     //    is skipped only when it is an *actual* whiteout (0-byte marker or
     //    char device — already folded into `deleted` above). A non-empty
     //    `.wh.x` is a plain user file and must stay visible, otherwise real
-    //    changes are silently dropped (round-21).
+    //    changes are silently dropped (round-21). `.cowt-copy-tmp.*` is a
+    //    reserved copy_up namespace (round-36): a crash between copy and
+    //    rename leaves it in upper and it must never surface as an entry.
     for (rel, entry) in scan.entries {
-        let wh_name = rel
-            .file_name()
-            .and_then(|n| n.to_str())
+        let name = rel.file_name().and_then(|n| n.to_str());
+        let wh_name = name
             .map(|n| n.starts_with(WHITEOUT_PREFIX))
             .unwrap_or(false);
         if wh_name && is_wh_prefixed_whiteout(&upper.join(&rel)) {
+            continue;
+        }
+        if name
+            .map(|n| n.starts_with(COPY_TMP_PREFIX))
+            .unwrap_or(false)
+        {
             continue;
         }
         // A non-directory entry replacing a base directory shadows the whole

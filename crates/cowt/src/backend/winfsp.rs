@@ -532,7 +532,10 @@ impl CowFs {
                 // Torn copy (wrong size): replace below.
             }
         }
-        let tmp = dst.with_extension("tmp");
+        let tmp = dst.with_file_name(format!(
+            ".cowt-copy-tmp.{}",
+            dst.file_name().unwrap_or_default().to_string_lossy()
+        ));
         fs::copy(&src, &tmp)?;
         fs::rename(&tmp, &dst)?;
         Ok(dst)

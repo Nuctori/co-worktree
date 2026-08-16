@@ -214,7 +214,10 @@ impl CowFs {
                 // Torn copy (wrong size): replace below.
             }
         }
-        let tmp = dst.with_extension("tmp");
+        let tmp = dst.with_file_name(format!(
+            ".cowt-copy-tmp.{}",
+            dst.file_name().unwrap_or_default().to_string_lossy()
+        ));
         fs::copy(&src, &tmp)?;
         fs::rename(&tmp, &dst)?;
         Ok(dst)
@@ -1099,7 +1102,20 @@ impl Backend for FuseT {
         // process; here we only undo the symlink.
         let state = match fs::read_link(mountpoint) {
             Ok(target) => target,
-            Err(_) => return Ok(()), // not our symlink: nothing to restore
+            Err(_) => {
+                // Round-36: kill -9 between rename(target->real) and the
+                // symlink creation strands `real` with no mountpoint
+                // symlink. Find the state dir whose meta.target is this
+                // mountpoint and restore the host dir.
+                if let Some(dir) = find_state_for(mountpoint) {
+                    let layout = Layout {
+                        real: dir.join("real"),
+                        view: dir.join("view"),
+                    };
+                    restore(mountpoint, &layout)?;
+                }
+                return Ok(());
+            }
         };
         // The symlink target must be a cowt VIEW: basename "view" whose
         // parent is a worktree state dir INSIDE the cowt state root. A
@@ -1142,8 +1158,20 @@ impl Backend for FuseT {
     }
 
     fn is_mounted(&self, mountpoint: &Path) -> bool {
-        fs::symlink_metadata(mountpoint)
+        // Round-36: a kill -9 between rename(target->real) and the symlink
+        // creation strands `real` with NO mountpoint symlink — the symlink
+        // check alone misses it and drop --force hits the real guard. A
+        // state dir with meta.target == mountpoint and a `real` present is
+        // as much evidence of an in-flight mount as the symlink (WinFsp
+        // already checks both).
+        if fs::symlink_metadata(mountpoint)
             .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        find_state_for(mountpoint)
+            .map(|dir| dir.join("real").exists())
             .unwrap_or(false)
     }
 }
@@ -1165,6 +1193,26 @@ impl Layout {
             view: state.join("view"),
         }
     }
+}
+
+/// Find the state dir whose meta.json names `mountpoint` as its target.
+/// Used when the mountpoint symlink is missing (kill -9 between the
+/// rename(target->real) and the symlink creation, round-36) — the state
+/// dir is the only remaining link between the stranded `real` and the host
+/// path.
+fn find_state_for(mountpoint: &Path) -> Option<PathBuf> {
+    let root = crate::state::State::open().ok()?.root().to_path_buf();
+    let rd = std::fs::read_dir(&root).ok()?;
+    for e in rd.flatten() {
+        let dir = e.path();
+        let Ok(meta) = crate::state::State::load_meta(&dir) else {
+            continue;
+        };
+        if meta.target == mountpoint {
+            return Some(dir);
+        }
+    }
+    None
 }
 
 /// Restore the host directory: move `state/real` back to `mountpoint`.

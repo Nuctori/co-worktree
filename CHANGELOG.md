@@ -365,6 +365,30 @@ All notable changes to co-worktree are documented here.
 - Regression locks: state-root containment, mounted-target refusal,
   trash-prefixed name rejection.
 
+### Added — round 36 (crash-window recovery matrix)
+
+- Linux: a kill -9 between mount success and pidfile write left a live
+  overlay with NO ownership proof — run/apply/diff and `drop --force` all
+  refused it forever (manual umount only). Ownership now also checks the
+  mount options (`upperdir=<state>/<id>/upper`) in `/proc/self/mounts`,
+  so such leftovers are recognized and torn down.
+- winfsp/macOS: `copy_up`'s temp file moved into a reserved
+  `.cowt-copy-tmp.` namespace that `effective_manifest` filters — a crash
+  between copy and rename previously surfaced as a ghost `A foo.tmp` diff
+  and applied the torn file into the host directory.
+- macOS: a kill -9 between `rename(target→real)` and the mountpoint
+  symlink stranded the host dir with no way out (run failed, `drop
+  --force` hit the real guard). `is_mounted` now also recognizes the
+  stranded state via meta.target, and `unmount` restores it.
+- `apply` sweeps stale `.cowt-apply-<pid>-*` staging dirs (dead pid only)
+  — crashed applies no longer accumulate unbounded staged copies in the
+  target's parent.
+- `atomic_write` sweeps stale `*.json.tmp-<pid>-*` residue (dead pid
+  only) — crashed fork/apply no longer accumulate unbounded manifest
+  copies in the state dir.
+- Regression locks: copy-tmp invisibility (effective_manifest + plan),
+  stale tmp sweep, staging sweep.
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX

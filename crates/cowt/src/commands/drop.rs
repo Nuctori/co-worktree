@@ -81,7 +81,9 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
             if !backend.is_mounted(&meta.target) {
                 break;
             }
-            let own_leftover = State::stale_run(&dir) || dir.join("real").exists();
+            let own_leftover = State::stale_run(&dir)
+                || dir.join("real").exists()
+                || crate::backend::mount_upper_proves_ours(&meta.target, &dir);
             // The mount must ALSO be provably ours: a stale pidfile alone
             // does not authorize tearing down a foreign filesystem mounted
             // at the target later (D-005 boundary, round-31).
