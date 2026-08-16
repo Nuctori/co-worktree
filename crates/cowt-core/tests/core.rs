@@ -1638,8 +1638,10 @@ fn macos_scan_canonicalizes_keys_to_nfc() {
 
 // ---------------------------------------------------------------- R32
 
-/// Round-32: a deep directory chain (~1900 levels) scans without fd
-/// exhaustion or warnings (walkdir's bounded fd use) — regression lock.
+/// Round-32: a deep directory chain scans without fd exhaustion or
+/// warnings (walkdir's bounded fd use) — regression lock. Depth is capped
+/// at 400 so the path fits macOS PATH_MAX (1024); still deep enough to
+/// trip naive per-level-fd recursion on common ulimits.
 #[cfg(unix)]
 #[test]
 fn scan_deep_directory_chain() {
@@ -1647,7 +1649,7 @@ fn scan_deep_directory_chain() {
     let d = tmp.path().join("d");
     fs::create_dir_all(&d).unwrap();
     let mut cur = d.clone();
-    for _ in 0..1900 {
+    for _ in 0..400 {
         cur.push("x");
     }
     fs::create_dir_all(&cur).unwrap();
@@ -1665,7 +1667,7 @@ fn scan_deep_directory_chain() {
         out.warnings
     );
     assert!(
-        out.manifest.entries.len() >= 1901,
+        out.manifest.entries.len() >= 401,
         "deep chain must be scanned, got {} entries",
         out.manifest.entries.len()
     );
