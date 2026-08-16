@@ -735,16 +735,20 @@ mod tests {
             "alive pid with mismatched starttime is a recycled pid — must be stale"
         );
         // Same pid, CORRECT starttime: genuinely running — not stale.
-        let real = crate::backend::process_starttime(std::process::id()).unwrap_or(1);
-        fs::write(
-            tmp.path().join("run.pid"),
-            format!("{}:{real}", std::process::id()),
-        )
-        .unwrap();
-        assert!(
-            !State::stale_run(tmp.path()),
-            "alive pid with matching starttime is running — not stale"
-        );
+        // (Skip when the platform cannot report starttimes — then the
+        // pidfile carries no starttime and the plain-dead check still
+        // applies, which the tests above cover.)
+        if let Some(real) = crate::backend::process_starttime(std::process::id()) {
+            fs::write(
+                tmp.path().join("run.pid"),
+                format!("{}:{real}", std::process::id()),
+            )
+            .unwrap();
+            assert!(
+                !State::stale_run(tmp.path()),
+                "alive pid with matching starttime is running — not stale"
+            );
+        }
     }
 
     /// Round-34: the v1 minimal meta.json contract lock — a meta with only
