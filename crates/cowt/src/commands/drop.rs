@@ -270,13 +270,12 @@ fn is_zombie(pid: u32) -> bool {
         .unwrap_or(false)
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(all(unix, not(target_os = "linux")))]
 fn is_zombie(_pid: u32) -> bool {
     false
 }
 
 #[cfg(windows)]
-fn terminate(pid: u32) -> Result<()> {
 fn terminate(pid: u32) -> Result<()> {
     use crate::state::pid_alive;
     use std::process::Command;
