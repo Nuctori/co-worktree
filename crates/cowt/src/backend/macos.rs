@@ -564,7 +564,7 @@ impl Filesystem for CowFs {
         };
         // `.wh.`/`.cowt-copy-tmp.` are reserved namespaces — refuse
         // (round-21, round-40 review).
-        if is_reserved_name(name) {
+        if is_reserved_name(link_name) {
             return reply.error(libc::EPERM);
         }
         self.clear_whiteout(&rel);
