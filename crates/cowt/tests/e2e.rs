@@ -1609,8 +1609,20 @@ fn e2e_grandchild_holding_cwd_is_reaped() {
         }
     };
     let gpid: u32 = text.trim().parse().expect("grandchild pid parses");
+    // The group kill must have terminated it. kill -0 reports a ZOMBIE as
+    // alive (the pid exists until PID 1 reaps it), so poll briefly instead
+    // of asserting on a single probe (round-40 review flake hardening).
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut gone = false;
+    while Instant::now() < deadline {
+        if !pid_alive(gpid) {
+            gone = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(100));
+    }
     assert!(
-        !pid_alive(gpid),
+        gone,
         "grandchild holding the view cwd must be reaped by the group kill"
     );
     env.cowt_ok(&["drop", &id]);

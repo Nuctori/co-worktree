@@ -2254,10 +2254,6 @@ fn windows_inexpressible_keys_detected() {
 /// Round-24/39 coverage locks: verify_unchanged's three abort branches.
 /// Host changes landing between planning and execution must abort the
 /// apply — silent overwrite/deletion of fresh host data is forbidden.
-/// A host file DELETED after planning must abort (WriteFile/Delete target
-/// vanished).
-/// A host file DELETED after planning must abort (WriteFile/Delete target
-/// vanished).
 #[test]
 fn verify_unchanged_aborts_on_disappeared_host_file() {
     let tmp = TempDir::new().unwrap();
