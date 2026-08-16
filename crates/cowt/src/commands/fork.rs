@@ -31,7 +31,15 @@ pub fn fork(args: ForkArgs) -> Result<()> {
     // State root FIRST: every later failure (and the scan itself) needs it,
     // and the boundary checks need the state root to detect containment.
     let state = State::open()?;
-    let state_root = state.root();
+    // Canonicalize for prefix comparison: the env (TMP, COWT_HOME) may
+    // spell the same directory with an 8.3 short name vs the long form,
+    // and Path::starts_with is byte-exact (round-35).
+    let state_root = state
+        .root()
+        .canonicalize()
+        .unwrap_or_else(|_| state.root().to_path_buf());
+    #[cfg(windows)]
+    let state_root = crate::state::dos_path(&state_root);
 
     // Round-35: the target and the state root must not contain each other.
     // If the target contains the state root, the baseline would snapshot
