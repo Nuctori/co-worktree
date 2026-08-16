@@ -274,19 +274,9 @@ fn is_zombie(pid: u32) -> bool {
 fn is_zombie(_pid: u32) -> bool {
     false
 }
-    for _ in 0..20 {
-        if !pid_alive(pid) {
-            return Ok(());
-        }
-        std::thread::sleep(std::time::Duration::from_millis(100));
-    }
-    anyhow::bail!(
-        "process {pid} survived SIGKILL (uninterruptible or protected); \
-         refusing to continue. Investigate the process, then drop again"
-    )
-}
 
 #[cfg(windows)]
+fn terminate(pid: u32) -> Result<()> {
 fn terminate(pid: u32) -> Result<()> {
     use crate::state::pid_alive;
     use std::process::Command;
