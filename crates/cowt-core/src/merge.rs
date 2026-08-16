@@ -101,6 +101,10 @@ pub fn plan(base: &Manifest, current: &Manifest, work: &Manifest, work_root: &Pa
     paths.extend(base.entries.keys().cloned());
     paths.extend(current.entries.keys().cloned());
     paths.extend(work.entries.keys().cloned());
+    // Base-key membership set for host_only_entries: precomputed once so
+    // the per-deleted-dir scans stay O(n + d·depth) instead of O(d·n)
+    // (round-32).
+    let base_keys: std::collections::HashSet<&PathBuf> = base.entries.keys().collect();
 
     for path in paths {
         let b = base.entries.get(&path);
@@ -137,7 +141,7 @@ pub fn plan(base: &Manifest, current: &Manifest, work: &Manifest, work_root: &Pa
                             let dir_to_non_dir =
                                 b_entry.kind == EntryKind::Dir && entry.kind != EntryKind::Dir;
                             if dir_to_non_dir {
-                                let host_only = host_only_entries(base, current, &path);
+                                let host_only = host_only_entries(&base_keys, current, &path);
                                 if !host_only.is_empty() {
                                     push_host_only_conflicts(&mut out, current, host_only);
                                     continue;
@@ -161,7 +165,7 @@ pub fn plan(base: &Manifest, current: &Manifest, work: &Manifest, work_root: &Pa
                     // (round-24).
                     let dir_delete = matches!(b, Some(e) if e.kind == EntryKind::Dir);
                     if dir_delete {
-                        let host_only = host_only_entries(base, current, &path);
+                        let host_only = host_only_entries(&base_keys, current, &path);
                         if !host_only.is_empty() {
                             push_host_only_conflicts(&mut out, current, host_only);
                             continue;
@@ -238,14 +242,14 @@ fn hash_of(e: &Entry) -> Option<String> {
 /// the host created them after the fork. Shared by the pure-delete branch
 /// and the dir->file/symlink migration branch (round-24/25).
 fn host_only_entries<'a>(
-    base: &'a Manifest,
+    base_keys: &std::collections::HashSet<&'a PathBuf>,
     current: &'a Manifest,
     dir: &Path,
 ) -> Vec<&'a PathBuf> {
     current
         .entries
         .keys()
-        .filter(|p| p.starts_with(dir) && **p != *dir && !base.entries.contains_key(*p))
+        .filter(|p| p.starts_with(dir) && **p != *dir && !base_keys.contains(*p))
         .collect()
 }
 

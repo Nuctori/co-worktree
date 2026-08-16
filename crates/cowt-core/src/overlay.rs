@@ -54,22 +54,24 @@ pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
 
     // Opaque dirs: every base entry strictly below the dir is shadowed unless
     // re-created in upper. Apply before whiteouts so explicit re-adds win.
+    // Batch: collect all shadowed paths first, then ONE retain (round-32 —
+    // per-dir retains were O(n·m) on large trees).
+    let mut shadowed: Vec<PathBuf> = Vec::new();
     for dir in &opaque_dirs {
         let prefix = dir.clone();
-        let upper_paths: Vec<PathBuf> = scan
+        let upper_paths: std::collections::BTreeSet<&PathBuf> = scan
             .entries
             .keys()
             .filter(|p| p.starts_with(&prefix))
-            .cloned()
             .collect();
-        entries.retain(|p, _| {
-            if p.starts_with(&prefix) && !upper_paths.iter().any(|u| u == p) {
-                // Shadowed by the opaque marker unless explicitly re-added.
-                false
-            } else {
-                true
+        for p in base.entries.keys() {
+            if p.starts_with(&prefix) && !upper_paths.contains(p) {
+                shadowed.push(p.clone());
             }
-        });
+        }
+    }
+    if !shadowed.is_empty() {
+        entries.retain(|p, _| !shadowed.contains(p));
     }
 
     // 2. Whiteouts delete the named sibling AND its whole subtree. Kernel
@@ -78,9 +80,25 @@ pub fn effective_manifest(base: &Manifest, upper: &Path) -> Result<Manifest> {
     //    a parent dir is removed, so the top-level whiteout must cover all
     //    descendants (Path::starts_with is component-wise, so a file whiteout
     //    still only matches itself).
-    for d in deleted {
-        let prefix = d.clone();
-        entries.retain(|p, _| !p.starts_with(&prefix));
+    //
+    //    Batch into a single retain with a prefix set: per-whiteout retains
+    //    were O(n·m) (n entries × m whiteouts) on large trees (round-32).
+    if !deleted.is_empty() {
+        let prefixes: std::collections::BTreeSet<PathBuf> = deleted.into_iter().collect();
+        entries.retain(|p, _| {
+            // A whiteout shadows the path itself or any ancestor (dir
+            // whiteout covers the whole subtree). Walk the ancestor chain:
+            // O(depth · log m) per entry instead of O(m) via .any()
+            // (round-32).
+            let mut cur = Some(p.as_path());
+            while let Some(c) = cur {
+                if prefixes.contains(c) {
+                    return false;
+                }
+                cur = c.parent().filter(|_| !c.as_os_str().is_empty());
+            }
+            true
+        });
     }
 
     // 3. Everything present in upper overrides base. A `.wh.`-prefixed name
@@ -145,58 +163,69 @@ fn base_has_descendant(base: &Manifest, rel: &Path) -> bool {
 ///     name (fuse-overlayfs with working mknod, kernel overlayfs);
 ///   * `.wh.`-prefixed: a zero-size regular file or char device named
 ///     `.wh.<name>` (fuse-overlayfs fallback when mknod is unavailable).
+///
+/// Iterative (explicit stack): recursion was unbounded in depth and held a
+/// read_dir fd per level, silently missing whiteouts past the fd limit on
+/// very deep trees (round-32).
 fn collect_whiteouts(
     root: &Path,
-    dir: &Path,
+    start: &Path,
     deleted: &mut Vec<PathBuf>,
     opaque_dirs: &mut Vec<PathBuf>,
 ) {
-    let rd = match std::fs::read_dir(dir) {
-        Ok(r) => r,
-        Err(_) => return,
-    };
-    for item in rd.flatten() {
-        let path = item.path();
-        let name = item.file_name();
-        let Some(name) = name.to_str() else { continue };
+    let mut stack = vec![start.to_path_buf()];
+    while let Some(dir) = stack.pop() {
+        let rd = match std::fs::read_dir(&dir) {
+            Ok(r) => r,
+            // Unreadable subdir (fd exhaustion, permissions): skip this
+            // subtree silently, as before — the parent's whiteouts still
+            // apply.
+            Err(_) => continue,
+        };
+        for item in rd.flatten() {
+            let path = item.path();
+            let name = item.file_name();
+            let Some(name) = name.to_str() else { continue };
 
-        if name == OPAQUE_MARKER && is_whiteout(&path) {
-            if let Ok(rel) = path.strip_prefix(root) {
-                if let Some(parent) = rel.parent() {
-                    opaque_dirs.push(parent.to_path_buf());
-                }
-            }
-            continue;
-        }
-
-        if let Some(victim_name) = name.strip_prefix(WHITEOUT_PREFIX) {
-            // `.wh.<name>` encoding (char device or zero-size regular file).
-            if is_wh_prefixed_whiteout(&path) {
+            if name == OPAQUE_MARKER && is_whiteout(&path) {
                 if let Ok(rel) = path.strip_prefix(root) {
-                    deleted.push(rel.with_file_name(victim_name));
+                    if let Some(parent) = rel.parent() {
+                        opaque_dirs.push(parent.to_path_buf());
+                    }
                 }
+                continue;
             }
-            continue;
-        }
 
-        // Kernel-style encoding: char device 0:0 with the victim's own name.
-        if is_whiteout(&path) {
-            if let Ok(rel) = path.strip_prefix(root) {
-                deleted.push(rel.to_path_buf());
+            if let Some(victim_name) = name.strip_prefix(WHITEOUT_PREFIX) {
+                // `.wh.<name>` encoding (char device or zero-size regular file).
+                if is_wh_prefixed_whiteout(&path) {
+                    if let Ok(rel) = path.strip_prefix(root) {
+                        deleted.push(rel.with_file_name(victim_name));
+                    }
+                }
+                continue;
             }
-            continue;
-        }
 
-        // Recurse only into real directories: `is_dir()` follows symlinks,
-        // and an upper-layer symlink/junction pointing at an external tree
-        // (created by any process during `cowt run`) would make every
-        // diff/apply walk that whole tree — a junction ring crashes with a
-        // stack overflow (reproduced). Never follow links here.
-        if std::fs::symlink_metadata(&path)
-            .map(|m| m.is_dir())
-            .unwrap_or(false)
-        {
-            collect_whiteouts(root, &path, deleted, opaque_dirs);
+            // Kernel-style encoding: char device 0:0 with the victim's own name.
+            if is_whiteout(&path) {
+                if let Ok(rel) = path.strip_prefix(root) {
+                    deleted.push(rel.to_path_buf());
+                }
+                continue;
+            }
+
+            // Descend only into real directories: `is_dir()` follows
+            // symlinks, and an upper-layer symlink/junction pointing at an
+            // external tree (created by any process during `cowt run`) would
+            // make every diff/apply walk that whole tree — a junction ring
+            // crashes with a stack overflow (reproduced). Never follow
+            // links here.
+            if std::fs::symlink_metadata(&path)
+                .map(|m| m.is_dir())
+                .unwrap_or(false)
+            {
+                stack.push(path);
+            }
         }
     }
 }

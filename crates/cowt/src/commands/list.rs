@@ -126,7 +126,11 @@ fn dir_size(path: &std::path::Path) -> std::io::Result<u64> {
     }
     for entry in fs::read_dir(path)? {
         let entry = entry?;
-        let meta = entry.metadata()?;
+        // symlink_metadata (no follow): a symlink pointing at an ancestor
+        // (self-ring) or an external tree must not be traversed — that
+        // would stack-overflow or count foreign data (round-32, mirrors
+        // the R10 collect_whiteouts fix).
+        let meta = fs::symlink_metadata(entry.path())?;
         if meta.is_dir() {
             total += dir_size(&entry.path())?;
         } else {

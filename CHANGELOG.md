@@ -260,6 +260,47 @@ All notable changes to co-worktree are documented here.
   equality, otherwise apply would never converge); host chmod in the
   plan→execute window aborts.
 
+### Added — round 31 (drop --force boundaries / missing worktree / running drop)
+
+- macOS `drop --force` now verifies the mountpoint symlink is a cowt view
+  under the state root (basename "view" + parent in COWT_HOME + worktree
+  fingerprint) before removing it — a foreign symlink pointing at user
+  data was previously deleted wholesale.
+- Linux `drop --force` only unmounts mounts whose `/proc/self/mounts`
+  device is overlay/fuse-overlayfs — a stale pidfile no longer authorizes
+  tearing down a foreign filesystem mounted later (D-005).
+- The `real`-dir data-loss check moved after the trash sweep (immediately
+  before the rename) with post-rename rollback, so the slow sweep cannot
+  widen a check→rename window during which a concurrent run moves the host
+  dir aside; the sweep itself skips trashes holding a `real` dir.
+- Half-created fork dirs (kill between create_dir and the manifest write:
+  only upper/work present) are now resolvable and cleanable by
+  `drop --force` — no more permanent ghosts.
+- Trash names use the state dir name, not raw `meta.id` (a corrupted id
+  could escape the state root).
+- `terminate` verifies the process actually died (SIGKILL/taskkill
+  follow-up with verification) and bails with the pid otherwise.
+- Regression locks: half-created-dir cleanup; trash sweep preserves
+  real-holding trashes.
+
+### Added — round 32 (resource limits: huge trees / deep nesting / fd exhaustion / large files)
+
+- `dir_size` (status/list) no longer follows symlinks — a self-ring or a
+  link to an external tree previously caused a stack overflow or counted
+  foreign bytes.
+- `effective_manifest` whiteout/opaque folding is now O(n·log m) instead
+  of O(n·m) — batch folding with ancestor-chain membership checks; bulk
+  deletions of tens of thousands of files no longer take minutes in
+  diff/apply.
+- `collect_whiteouts` is iterative (explicit stack) instead of recursive —
+  very deep trees no longer hit the fd limit and silently miss whiteouts.
+- `apply`'s post-commit baseline scan reuses the plan-time hashes
+  (`rescan(current)`) instead of hashing the whole tree twice.
+- `merge::plan` precomputes the base-key set for host-only checks —
+  deleting thousands of directories is no longer quadratic.
+- Regression locks: ~1900-level deep tree scan (fd bounded); 96MB file
+  streaming hash; 5k-entry × 800-whiteout fold stays fast.
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX

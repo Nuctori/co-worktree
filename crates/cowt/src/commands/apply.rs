@@ -134,7 +134,10 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
     // next run/diff/apply iterates against THIS state rather than the stale
     // fork snapshot (fixes apply→run→apply false conflicts, silently
     // dropped deletions of previously-applied files, and revert-to-base).
-    let new_base = Manifest::scan(&meta.target)?.manifest;
+    // rescan(current) reuses hashes for untouched files via stat_eq — the
+    // full scan above already hashed everything; a second full scan would
+    // double the I/O on large trees (round-32).
+    let new_base = Manifest::rescan(&meta.target, &current)?.manifest;
     State::write_manifest(&dir, &new_base)?;
     // Reset the layer: applied changes now live in the host. Keeping them
     // in upper would re-display them as pending and make upper-only

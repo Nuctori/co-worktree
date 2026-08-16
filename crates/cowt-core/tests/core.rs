@@ -1636,6 +1636,103 @@ fn macos_scan_canonicalizes_keys_to_nfc() {
     assert!(m.get(Path::new("cafe\u{301}.txt")).is_none());
 }
 
+// ---------------------------------------------------------------- R32
+
+/// Round-32: a deep directory chain (~1900 levels) scans without fd
+/// exhaustion or warnings (walkdir's bounded fd use) — regression lock.
+#[cfg(unix)]
+#[test]
+fn scan_deep_directory_chain() {
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    fs::create_dir_all(&d).unwrap();
+    let mut cur = d.clone();
+    for _ in 0..1900 {
+        cur.push("x");
+    }
+    fs::create_dir_all(&cur).unwrap();
+    fs::write(cur.join("leaf.txt"), "leaf").unwrap();
+
+    let started = std::time::Instant::now();
+    let out = Manifest::scan(&d).unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "deep scan must stay under the time box"
+    );
+    assert!(
+        out.warnings.is_empty(),
+        "deep scan must not hit fd exhaustion: {:?}",
+        out.warnings
+    );
+    assert!(
+        out.manifest.entries.len() >= 1901,
+        "deep chain must be scanned, got {} entries",
+        out.manifest.entries.len()
+    );
+}
+
+/// Round-32: a large file is hashed streaming (64KB buffer) — a 96MB file
+/// must scan without loading it whole (memory ceiling regression lock).
+#[test]
+fn scan_large_file_streaming_hash() {
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    fs::create_dir_all(&d).unwrap();
+    // 96 MB of zeros: fast to write, would blow a non-streaming hash.
+    let mut f = fs::File::create(d.join("big.bin")).unwrap();
+    let block = [0u8; 1 << 20];
+    for _ in 0..96 {
+        use std::io::Write;
+        f.write_all(&block).unwrap();
+    }
+    drop(f);
+
+    let started = std::time::Instant::now();
+    let out = Manifest::scan(&d).unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(30),
+        "large-file scan must stay under the time box"
+    );
+    let e = out.manifest.get(Path::new("big.bin")).unwrap();
+    assert_eq!(e.size, 96 * 1024 * 1024);
+    let h = e.hash.as_ref().unwrap();
+    assert_eq!(h.len(), 64, "hash must be the streaming BLAKE3 digest");
+}
+
+/// Round-32: whiteout folding of many victims is correct AND stays fast
+/// (no O(n·m) quadratic) — time-boxed regression lock.
+#[test]
+fn overlay_fold_many_whiteouts_stays_fast() {
+    let tmp = TempDir::new().unwrap();
+    let base_dir = tmp.path().join("base");
+    let upper = tmp.path().join("upper");
+    fs::create_dir_all(&base_dir).unwrap();
+    fs::create_dir_all(&upper).unwrap();
+    // 5k base entries.
+    for i in 0..5000 {
+        write(&base_dir, &format!("f{i:04}.txt"), "x");
+    }
+    // 800 whiteouts over distinct victims.
+    for i in 0..800 {
+        fs::write(upper.join(format!(".wh.f{i:04}.txt")), b"").unwrap();
+    }
+    let base_m = Manifest::scan(&base_dir).unwrap().manifest;
+
+    let started = std::time::Instant::now();
+    let effective = overlay::effective_manifest(&base_m, &upper).unwrap();
+    assert!(
+        started.elapsed() < std::time::Duration::from_secs(10),
+        "whiteout folding must not be quadratic"
+    );
+    for i in 0..800 {
+        assert!(
+            effective.get(Path::new(&format!("f{i:04}.txt"))).is_none(),
+            "victim {i} must be folded"
+        );
+    }
+    assert!(effective.get(Path::new("f1000.txt")).is_some());
+}
+
 // ---------------------------------------------------------------- R30
 
 /// Round-30: chmod-only on a FILE reports Modified and apply restores the
