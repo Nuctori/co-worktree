@@ -341,14 +341,20 @@ pub fn execute(plan_result: &MergePlan, target_root: &Path) -> Result<ApplyRepor
 /// Linux-created manifest key ("dir/Foo.txt") and a Windows scan key
 /// ("dir\Foo.txt") denote the same file but fold to different strings.
 /// Comparing folded component sequences matches Path's own
-/// separator-insensitive equality.
+/// separator-insensitive equality. The joined form doubles as a cheap map
+/// key (O(n log n) collision detection; a Vec+any scan was O(n²) and
+/// turned 10k-file diffs into 44s on Windows — round-40 CI).
+pub fn case_fold_key(p: &Path) -> String {
+    p.components()
+        .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
+        .collect::<Vec<_>>()
+        .join("\u{0}")
+}
+
+/// Case-fold equality of two relative paths, component-wise (see
+/// [`case_fold_key`]).
 pub fn case_fold_path_eq(a: &Path, b: &Path) -> bool {
-    fn fold_components(p: &Path) -> Vec<String> {
-        p.components()
-            .map(|c| c.as_os_str().to_string_lossy().to_lowercase())
-            .collect()
-    }
-    fold_components(a) == fold_components(b)
+    case_fold_key(a) == case_fold_key(b)
 }
 
 /// Case-fold collisions in `work` against `base`/`current`, for
@@ -359,21 +365,24 @@ pub fn case_fold_path_eq(a: &Path, b: &Path) -> bool {
 /// diagnosed apply deadlock (round-38-02). Returns the colliding work
 /// paths; the caller refuses with an explicit message instead of planning.
 pub fn case_fold_conflicts(base: &Manifest, work: &Manifest, current: &Manifest) -> Vec<PathBuf> {
-    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut seen: std::collections::BTreeMap<String, PathBuf> = Default::default();
+    let base_current: std::collections::BTreeMap<String, PathBuf> = base
+        .entries
+        .keys()
+        .chain(current.entries.keys())
+        .map(|p| (case_fold_key(p), p.clone()))
+        .collect();
     let mut conflicts: Vec<PathBuf> = Vec::new();
     for p in work.entries.keys() {
+        let k = case_fold_key(p);
         // Collision within work itself (two keys differing by case only —
         // a cross-platform manifest, round-38-04).
-        if let Some(other) = seen.iter().find(|s| case_fold_path_eq(s, p)) {
-            conflicts.push(other.clone());
+        if let Some(other) = seen.insert(k.clone(), p.clone()) {
+            conflicts.push(other);
             conflicts.push(p.clone());
         }
-        seen.push(p.clone());
-        for bp in base.entries.keys().chain(current.entries.keys()) {
-            if bp == p {
-                continue;
-            }
-            if case_fold_path_eq(bp, p)
+        if let Some(bp) = base_current.get(&k) {
+            if bp != p
                 // Only a real collision when the other spelling SURVIVES
                 // in the worktree: a case-different recreate (delete
                 // cache.bin + add CACHE.BIN) is a rename-in-place on NTFS
@@ -381,7 +390,6 @@ pub fn case_fold_conflicts(base: &Manifest, work: &Manifest, current: &Manifest)
                 && work.entries.contains_key(bp)
             {
                 conflicts.push(p.clone());
-                break;
             }
         }
     }

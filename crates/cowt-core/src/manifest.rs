@@ -428,13 +428,14 @@ impl Manifest {
 /// while a "/" key and a "\" key denote the same file on Windows). Returns
 /// the colliding keys; the caller refuses with a cross-platform explanation.
 pub fn case_fold_collision_keys(entries: &BTreeMap<PathBuf, Entry>) -> Vec<PathBuf> {
-    let mut seen: Vec<PathBuf> = Vec::new();
+    let mut seen: std::collections::BTreeMap<String, PathBuf> = Default::default();
     let mut collisions: Vec<PathBuf> = Vec::new();
     for p in entries.keys() {
-        if seen.iter().any(|s| crate::merge::case_fold_path_eq(s, p)) {
+        let k = crate::merge::case_fold_key(p);
+        if let Some(other) = seen.insert(k, p.clone()) {
+            collisions.push(other);
             collisions.push(p.clone());
         }
-        seen.push(p.clone());
     }
     collisions.sort();
     collisions.dedup();
