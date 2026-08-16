@@ -342,6 +342,29 @@ All notable changes to co-worktree are documented here.
   contracts, full-entry round-trip (previously only one symlink target
   was round-tripped).
 
+### Added — round 35 (fork: id conflicts / source validation / running fork)
+
+- `fork` refuses a target that contains (or is inside) the cowt state root
+  — the baseline previously snapshotted cowt's own state (other worktrees'
+  uppers), and on winfsp/macOS the worktree could never run (moving the
+  host dir into its own subdirectory fails).
+- `fork` refuses a currently-mounted target (a `cowt run` in progress or a
+  foreign mount) — the baseline previously captured the uncommitted merged
+  view, including possibly torn upper writes.
+- `fork` refuses when `$HOME` is unset and `--force-path` was not given
+  (the boundary check was silently skipped), and opens the state root
+  before scanning (error ordering).
+- `fork` fails loudly when the scan found 0 entries with warnings — a
+  fully unreadable directory no longer produces an "empty" worktree whose
+  diff later reports every host file as Added.
+- `fork --name .trash-*` is refused (such a worktree would be
+  unaddressable by name).
+- Concurrent same-name forks are serialized by a post-write name re-check:
+  both could previously pass the pre-check (the other's meta.json wasn't
+  written yet) and produce an ambiguous duplicate.
+- Regression locks: state-root containment, mounted-target refusal,
+  trash-prefixed name rejection.
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX

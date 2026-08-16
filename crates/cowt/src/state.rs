@@ -129,12 +129,36 @@ impl State {
             Self::write_meta(&dir, meta)?;
             Ok(())
         })();
+        // Round-35: re-check the name AFTER meta.json is written. The
+        // pre-check above runs while a concurrent same-name fork may not
+        // have written its meta.json yet (list() skips those dirs), so two
+        // forks could both pass. The post-check sees both and rolls back
+        // the loser.
+        if result.is_ok() {
+            if let Some(name) = &meta.name {
+                let dups: Vec<String> = self
+                    .list()?
+                    .into_iter()
+                    .filter(|other| {
+                        other.id != meta.id && other.name.as_deref() == Some(name.as_str())
+                    })
+                    .map(|other| other.id)
+                    .collect();
+                if !dups.is_empty() {
+                    let _ = fs::remove_dir_all(&dir); // roll back
+                    bail!(
+                        "a worktree named '{name}' already exists (id {}); \
+                         pick a different --name",
+                        dups.join(", ")
+                    );
+                }
+            }
+        }
         if result.is_err() {
             let _ = fs::remove_dir_all(&dir); // roll back a half-created state
         }
         result.map(|()| dir)
     }
-
     pub fn write_meta(dir: &Path, meta: &WorktreeMeta) -> Result<()> {
         let json = serde_json::to_string_pretty(meta).context("serialize meta")?;
         atomic_write(&dir.join("meta.json"), json.as_bytes()).context("write meta.json")
@@ -345,6 +369,10 @@ pub fn valid_id_or_name(s: &str) -> bool {
         && !s.contains('/')
         && !s.contains('\\')
         && !s.contains("..")
+        // `.trash-` is the drop-leftover namespace; creating a worktree
+        // with that name would be unaddressable by name (resolve refuses
+        // it — round-33/35).
+        && !s.starts_with(".trash-")
         // Control characters (newline/tab/ESC...) would break the
         // one-worktree-per-line output contract and allow terminal
         // injection through a user-chosen label (round-33).
@@ -369,7 +397,10 @@ fn atomic_write(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
     std::fs::rename(&tmp, path)
 }
 
-/// Generate a short random id (8 hex chars) from /dev/urandom, time and pid.
+/// Generate a short random id (16 hex chars = 64 bits) from /dev/urandom,
+/// falling back to time+pid when it is unavailable (e.g. Windows). A
+/// collision is detected by the exclusive state-dir create and reported —
+/// no retry, acceptable at 2^-64 for human-scale fork rates (round-35).
 pub fn short_id() -> String {
     let mut seed = [0u8; 8];
     let filled = fs::File::open("/dev/urandom")

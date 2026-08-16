@@ -1231,3 +1231,99 @@ fn status_upper_unreadable_is_not_zero() {
         "unreadable upper must not fabricate upper_bytes:0"
     );
 }
+
+// ---------------------------------------------------------------- R35
+
+/// Round-35: forking a target that CONTAINS the state root must be refused
+/// (the baseline would snapshot cowt's own state; winfsp/macOS runs would
+/// fail moving the host dir into its own subdirectory).
+#[test]
+fn fork_refuses_target_containing_state_root() {
+    // Build a target that actually CONTAINS the state root.
+    let tmp = TempDir::new().unwrap();
+    let home = tmp.path().join("home");
+    let state = tmp.path().join("home/.cowt-state"); // inside home
+    let target = tmp.path().join("home");
+    fs::create_dir_all(&target).unwrap();
+    fs::write(target.join("f.txt"), "x").unwrap();
+    let env = Env::new(); // for cowt() helper env wiring
+    let mut c = env.cowt();
+    c.env("COWT_HOME", &state).env("HOME", &home);
+    let out = c
+        .args(["fork", target.to_str().unwrap(), "--force-path"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "fork of a dir containing the state root must be refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        String::from_utf8_lossy(&out.stderr).contains("state root"),
+        "error must explain the state-root containment"
+    );
+}
+
+/// Round-35: forking a target that IS the state root must be refused.
+#[test]
+fn fork_refuses_state_root_itself() {
+    let env = Env::new();
+    let out = env
+        .cowt()
+        .args(["fork", env.state.to_str().unwrap(), "--force-path"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "fork of the state root must be refused"
+    );
+}
+
+/// Round-35: forking while the target is mounted (a worktree running) must
+/// be refused — the baseline would snapshot the uncommitted merged view.
+#[test]
+fn fork_refuses_mounted_target() {
+    let env = Env::new();
+    if !env.fuse_available() {
+        eprintln!("backend unavailable; skipping");
+        return;
+    }
+    env.fork();
+    let cmd = sleep_cmd();
+    let mut cowt = env.cowt();
+    cowt.args(["run", "demo", "--"]).args(&cmd);
+    let mut sleeper = cowt.spawn().unwrap();
+    // Give the run a moment to mount.
+    std::thread::sleep(std::time::Duration::from_millis(800));
+    let out = env
+        .cowt()
+        .args(["fork", env.target.to_str().unwrap(), "--name", "second"])
+        .output()
+        .unwrap();
+    let _ = sleeper.kill();
+    let _ = sleeper.wait();
+    // Allow the mount to come down before the tempdir is dropped.
+    std::thread::sleep(std::time::Duration::from_millis(500));
+    assert!(
+        !out.status.success(),
+        "fork of a mounted target must be refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
+
+/// Round-35: `fork --name .trash-*` must be refused (unaddressable by
+/// name; resolve rejects the prefix).
+#[test]
+fn fork_rejects_trash_prefixed_name() {
+    let env = Env::new();
+    let out = env
+        .cowt()
+        .args(["fork", env.target.to_str().unwrap(), "--name", ".trash-x"])
+        .output()
+        .unwrap();
+    assert!(
+        !out.status.success(),
+        "fork --name .trash-x must be refused: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+}
