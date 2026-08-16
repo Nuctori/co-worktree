@@ -182,13 +182,10 @@ proptest! {
         std::fs::create_dir_all(&base_dir).expect("mkdir base");
         std::fs::create_dir_all(&upper).expect("mkdir upper");
 
+        // The base manifest is purely in-memory — effective_manifest_fold
+        // only reads the UPPER directory.
         let mut base_entries = std::collections::BTreeMap::new();
         for p in &base_paths {
-            let full = base_dir.join(p);
-            if let Some(parent) = full.parent() {
-                std::fs::create_dir_all(parent).expect("mkdir parent");
-            }
-            std::fs::write(&full, b"x").expect("write base file");
             base_entries.insert(p.clone(), entry());
         }
         let base = cowt_core::Manifest {
@@ -198,20 +195,28 @@ proptest! {
             entries: base_entries,
         };
         // Upper: real files (maybe a case variant of a base file), plus
-        // whiteouts and copy-tmp residues.
+        // whiteouts and copy-tmp residues. Random paths can be
+        // prefix-conflicting ("a" and "a/b") — skip entries whose parents
+        // cannot be created (the property still holds for the rest).
         for p in &upper_paths {
             let full = upper.join(p);
-            if let Some(parent) = full.parent() {
-                std::fs::create_dir_all(parent).expect("mkdir parent");
+            let created = full.parent().map(|parent| std::fs::create_dir_all(parent).is_ok());
+            if created == Some(false) {
+                continue;
             }
-            std::fs::write(&full, b"y").expect("write upper file");
+            if std::fs::write(&full, b"y").is_err() {
+                continue;
+            }
         }
         for w in &whiteout_names {
             let wh_path = upper.join(format!(".wh.{}", w.display()));
-            if let Some(parent) = wh_path.parent() {
-                std::fs::create_dir_all(parent).expect("mkdir parent");
+            if wh_path.parent().map(|parent| std::fs::create_dir_all(parent).is_ok()) == Some(false)
+            {
+                continue;
             }
-            std::fs::write(&wh_path, b"").expect("whiteout");
+            if std::fs::write(&wh_path, b"").is_err() {
+                continue;
+            }
         }
         if with_copy_tmp {
             std::fs::write(upper.join(".cowt-copy-tmp.residue"), b"torn").expect("residue");
