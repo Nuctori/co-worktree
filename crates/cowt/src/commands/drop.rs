@@ -237,8 +237,6 @@ fn terminate(pid: u32) -> Result<()> {
     let _ = Command::new("kill").arg(pid.to_string()).status();
     // Wait briefly for SIGTERM to land, then escalate. `kill -0` probes
     // liveness on macOS too, where /proc does not exist.
-    // Wait briefly for SIGTERM to land, then escalate. `kill -0` probes
-    // liveness on macOS too, where /proc does not exist.
     for _ in 0..20 {
         if !pid_alive(pid) {
             return Ok(());
@@ -248,7 +246,34 @@ fn terminate(pid: u32) -> Result<()> {
     let _ = Command::new("kill").arg("-9").arg(pid.to_string()).status();
     // Verify SIGKILL landed; if the process survives, the drop must NOT
     // proceed (it would leave the mount/real in its hands and misreport
-    // the blocker — round-31).
+    // the blocker — round-31). A ZOMBIE counts as dead: it holds nothing
+    // (the parent will reap it), but kill -0 still reports it alive.
+    for _ in 0..20 {
+        if !pid_alive(pid) || is_zombie(pid) {
+            return Ok(());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(100));
+    }
+    anyhow::bail!(
+        "process {pid} survived SIGKILL (uninterruptible or protected); \
+         refusing to continue. Investigate the process, then drop again"
+    )
+}
+
+/// True if `pid` is a zombie (Linux: /proc/<pid>/stat state 'Z'). A zombie
+/// no longer runs and cannot hold the mount.
+#[cfg(target_os = "linux")]
+fn is_zombie(pid: u32) -> bool {
+    std::fs::read_to_string(format!("/proc/{pid}/stat"))
+        .ok()
+        .and_then(|s| s.split_whitespace().nth(2).map(|st| st == "Z"))
+        .unwrap_or(false)
+}
+
+#[cfg(not(target_os = "linux"))]
+fn is_zombie(_pid: u32) -> bool {
+    false
+}
     for _ in 0..20 {
         if !pid_alive(pid) {
             return Ok(());
