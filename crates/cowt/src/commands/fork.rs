@@ -47,7 +47,7 @@ pub fn fork(args: ForkArgs) -> Result<()> {
     // winfsp/macOS the run would try to move the host dir into its own
     // subdirectory, failing forever. If the target is inside the state
     // root, it is cowt-internal state.
-    if target.starts_with(state_root) || state_root.starts_with(&target) {
+    if target.starts_with(&state_root) || state_root.starts_with(&target) {
         bail!(
             "refusing to isolate {}: it contains (or is inside) the cowt state root {}",
             target.display(),
