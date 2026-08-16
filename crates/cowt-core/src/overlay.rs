@@ -109,9 +109,14 @@ pub fn effective_manifest_fold(base: &Manifest, upper: &Path, case_fold: bool) -
             let mut cur = Some(p.as_path());
             while let Some(c) = cur {
                 let hit = if case_fold {
-                    prefixes.iter().any(|pfx| {
-                        pfx.to_string_lossy().to_lowercase() == c.to_string_lossy().to_lowercase()
-                    })
+                    // Component-wise folding (round-40-01): the winfsp
+                    // delete path writes whiteouts using the HOST's actual
+                    // spelling (and separator), which may differ from the
+                    // base key by case alone after a host-side rename —
+                    // string-level folding would miss "/" vs "\" mixes.
+                    prefixes
+                        .iter()
+                        .any(|pfx| crate::merge::case_fold_path_eq(pfx, c))
                 } else {
                     prefixes.contains(c)
                 };

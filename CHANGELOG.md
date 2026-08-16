@@ -467,6 +467,25 @@ All notable changes to co-worktree are documented here.
   deleted/overwritten.
 - Regression lock: dir-delete TOCTOU abort (core).
 
+### Added — round 40 (cross-platform wrap-up)
+
+- Case-fold comparisons are now component-wise (`case_fold_path_eq`):
+  string-level folding was separator-sensitive, so a Linux-created
+  manifest key (`dir/Foo.txt`) never collided with a Windows scan key
+  (`dir\foo.txt`) — the R38 case-fold guards silently missed
+  cross-platform manifest × subdirectory × case-variant combinations,
+  resurrecting the R38-02 deadlock and R38-03 false-negative on Windows.
+- The `.cowt-old-*` interrupted-apply hint now scans each conflict's
+  parent directory (backups live next to their dest), not just the target
+  top level — nested file conflicts get the mv-restore hint too.
+- `list()` validates on-disk `meta.id` (forged/damaged meta.json with
+  separators or `..` is skipped with a warning): resolve's name lookup
+  joins that id into a path, which could otherwise point `drop --force`
+  at directories outside the state root (defense-in-depth; CLI side was
+  already locked by R22/R33).
+- Regression locks: separator-insensitive fold equality (core, all
+  platforms), escaping-id rejection (state unit).
+
 ### Known limitations
 
 - Crash windows with manual-only recovery (round-36, not auto-healed):

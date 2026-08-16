@@ -423,17 +423,18 @@ impl Manifest {
 
 /// Keys of `entries` that collide after case folding — two paths differing
 /// by case alone are physically one file on NTFS/default APFS (round-38-04:
-/// a Linux-created manifest read by a Windows cowt). Returns the colliding
-/// keys; the caller refuses with a cross-platform explanation.
+/// a Linux-created manifest read by a Windows cowt). Comparison is
+/// component-wise (round-40-01: string-level folding is separator-sensitive,
+/// while a "/" key and a "\" key denote the same file on Windows). Returns
+/// the colliding keys; the caller refuses with a cross-platform explanation.
 pub fn case_fold_collision_keys(entries: &BTreeMap<PathBuf, Entry>) -> Vec<PathBuf> {
-    let mut seen: std::collections::BTreeMap<String, PathBuf> = Default::default();
+    let mut seen: Vec<PathBuf> = Vec::new();
     let mut collisions: Vec<PathBuf> = Vec::new();
     for p in entries.keys() {
-        let folded = p.to_string_lossy().to_lowercase();
-        if let Some(other) = seen.insert(folded, p.clone()) {
-            collisions.push(other);
+        if seen.iter().any(|s| crate::merge::case_fold_path_eq(s, p)) {
             collisions.push(p.clone());
         }
+        seen.push(p.clone());
     }
     collisions.sort();
     collisions.dedup();

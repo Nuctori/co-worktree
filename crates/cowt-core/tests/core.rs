@@ -2146,6 +2146,48 @@ fn dir_delete_toctou_new_child_aborts_execute() {
     );
 }
 
+/// Round-40-01: case-fold path comparison must be separator-insensitive —
+/// a Linux manifest key "dir/Foo.txt" and a Windows scan key "dir\foo.txt"
+/// denote the same physical file and must collide. (Pure path logic, runs
+/// everywhere.)
+#[test]
+fn case_fold_path_eq_is_separator_insensitive() {
+    let a = Path::new("dir/Foo.txt");
+    let b = Path::new("dir/foo.txt");
+    let c = std::path::PathBuf::from("dir\\foo.txt"); // windows spelling
+    let d = Path::new("dir/other.txt");
+    assert!(merge::case_fold_path_eq(a, b));
+    assert!(
+        merge::case_fold_path_eq(a, &c),
+        "separator mix must fold equal"
+    );
+    assert!(!merge::case_fold_path_eq(a, d));
+    // end-to-end: a work key with the windows spelling collides with the
+    // linux-spelled base key.
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    fs::create_dir_all(&d).unwrap();
+    write(&d, "dir/Foo.txt", "base");
+    let base = scan(&d);
+    let mut work = base.clone();
+    work.entries.insert(
+        c.clone(),
+        cowt_core::Entry {
+            kind: cowt_core::EntryKind::File,
+            size: 4,
+            mode: 0o644,
+            mtime_ns: 0,
+            hash: None,
+            link_target: None,
+        },
+    );
+    let coll = merge::case_fold_conflicts(&base, &work, &base);
+    assert!(
+        coll.iter().any(|p| merge::case_fold_path_eq(p, &c)),
+        "windows-spelled case variant must be reported: {coll:?}"
+    );
+}
+
 /// Round-38-04: manifest keys colliding by case alone are detected by the
 /// pure helper (a Linux manifest read by a Windows cowt must refuse, not
 /// silently drop one key during apply).

@@ -280,7 +280,25 @@ impl State {
                 continue;
             }
             match Self::load_meta(&dir) {
-                Ok(meta) => out.push(meta),
+                Ok(meta) => {
+                    // Round-40-03: meta.json is a trust surface — a forged/
+                    // damaged meta whose `id` contains separators or ".."
+                    // would make resolve() join it into a path OUTSIDE the
+                    // state root (name lookups then point at arbitrary
+                    // directories; drop --force could rename+delete them).
+                    // The CLI-argument side is validated (valid_id_or_name);
+                    // the on-disk side must be too.
+                    if !valid_id_or_name(&meta.id) {
+                        eprintln!(
+                            "cowt: warning: {} has an invalid id {:?} in meta.json; \
+                             skipping it (a forged or damaged meta.json)",
+                            dir.display(),
+                            meta.id
+                        );
+                        continue;
+                    }
+                    out.push(meta)
+                }
                 // Round-23: a corrupt meta.json must not be silently hidden
                 // — the directory still exists and blocks drop; surface it.
                 Err(e) => eprintln!(
@@ -798,6 +816,39 @@ mod tests {
                 "alive pid with matching starttime is running — not stale"
             );
         }
+    }
+
+    /// Round-40-03: a forged meta.json whose id escapes the state root
+    /// (separators / "..") must be skipped by list() — resolve's name
+    /// lookup joins that id into a path, which could point drop --force at
+    /// arbitrary directories outside the state root.
+    #[test]
+    fn list_skips_meta_with_escaping_id() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = State {
+            root: tmp.path().to_path_buf(),
+        };
+        // A worktree-shaped dir with a forged meta.id.
+        let dir = state.root().join("0123456789abcdef");
+        fs::create_dir_all(dir.join("upper")).unwrap();
+        fs::write(
+            dir.join("meta.json"),
+            r#"{"id":"../../victim","name":"evil","target":"/x","created_epoch":0,"status":"ready","backend":"test"}"#,
+        )
+        .unwrap();
+        let metas = state.list().unwrap();
+        assert!(
+            metas.is_empty(),
+            "forged escaping id must be skipped: {metas:?}"
+        );
+        // A normal meta still lists.
+        fs::write(
+            dir.join("meta.json"),
+            r#"{"id":"0123456789abcdef","name":"demo","target":"/x","created_epoch":0,"status":"ready","backend":"test"}"#,
+        )
+        .unwrap();
+        let metas = state.list().unwrap();
+        assert_eq!(metas.len(), 1);
     }
 
     /// Round-34: the v1 minimal meta.json contract lock — a meta with only

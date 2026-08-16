@@ -142,16 +142,33 @@ pub fn apply(args: ApplyArgs) -> Result<i32> {
             // crash window, round-36-06) is the PRE-apply data of a file
             // whose apply was interrupted; a permanent Delete-vs-modify
             // conflict on it is recoverable by restoring the backup.
+            // Round-40-02: backups live next to their DEST (merge's
+            // do_rename), so nested conflicts need the parent dirs
+            // scanned, not just the target top level.
             #[cfg(not(unix))]
-            if let Ok(rd) = std::fs::read_dir(&meta.target) {
-                let mut old: Vec<String> = rd
-                    .flatten()
-                    .filter_map(|e| {
-                        let n = e.file_name().to_string_lossy().into_owned();
-                        n.contains(".cowt-old-").then_some(n)
-                    })
-                    .collect();
+            {
+                let mut old: Vec<String> = Vec::new();
+                for c in &plan.conflicts {
+                    if let Some(parent) = meta.target.join(&c.path).parent() {
+                        if let Ok(rd) = std::fs::read_dir(parent) {
+                            for e in rd.flatten() {
+                                let n = e.file_name().to_string_lossy().into_owned();
+                                if n.contains(".cowt-old-") {
+                                    old.push(format!(
+                                        "{}/{}",
+                                        c.path
+                                            .parent()
+                                            .map(|p| p.display().to_string())
+                                            .unwrap_or_default(),
+                                        n
+                                    ));
+                                }
+                            }
+                        }
+                    }
+                }
                 old.sort();
+                old.dedup();
                 if !old.is_empty() {
                     eprintln!(
                         "note: interrupted-apply backup file(s) found: {}; \
