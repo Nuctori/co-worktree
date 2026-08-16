@@ -332,12 +332,30 @@ impl State {
             Err(_) => return false,
         };
         let t = s.trim();
-        let pid = match t.split_once(':') {
-            Some((p, _)) => p.parse::<u32>().ok(),
-            None => t.parse::<u32>().ok(),
+        // `pid:starttime` (round-28 format): a DEAD pid whose number was
+        // recycled by an unrelated process must NOT look alive — stale_run
+        // would return false and drop --force would misjudge our own
+        // leftover mount as foreign (round-37 CI: pid reuse within the
+        // drop-vs-teardown race window). Verify starttime when present,
+        // exactly like running_pid does.
+        let (pid, expected_start) = match t.split_once(':') {
+            Some((p, st)) => (p.parse::<u32>().ok(), st.parse::<u128>().ok()),
+            None => (t.parse::<u32>().ok(), None),
         };
         match pid {
-            Some(p) => !pid_alive(p),
+            Some(p) => {
+                if !pid_alive(p) {
+                    return true; // verifiably dead
+                }
+                if let Some(expected) = expected_start {
+                    // Alive but with a different starttime: recycled pid —
+                    // our process is gone, the number was reused. The
+                    // pidfile records OUR run, so it is stale regardless of
+                    // what the recycled process is doing.
+                    return crate::backend::process_starttime(p) != Some(expected);
+                }
+                false
+            }
             None => false, // empty/garbage: ownership unknown, refuse
         }
     }
@@ -695,6 +713,38 @@ mod tests {
         // Ours matches -> removed.
         State::clear_running_if_owned(tmp.path(), std::process::id());
         assert!(!tmp.path().join("run.pid").exists());
+    }
+
+    /// Round-37: a dead run's pid REUSED by an unrelated live process must
+    /// still read as stale (starttime mismatch) — otherwise drop --force
+    /// misjudges our own leftover mount as foreign during the teardown
+    /// race, and the recycled process could not possibly be our child
+    /// (starttime differs).
+    #[test]
+    fn stale_run_detects_recycled_pid() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Our own pid with a BOGUS starttime simulates the recycled case:
+        // the pid is alive but is not the process we recorded.
+        fs::write(
+            tmp.path().join("run.pid"),
+            format!("{}:1", std::process::id()),
+        )
+        .unwrap();
+        assert!(
+            State::stale_run(tmp.path()),
+            "alive pid with mismatched starttime is a recycled pid — must be stale"
+        );
+        // Same pid, CORRECT starttime: genuinely running — not stale.
+        let real = crate::backend::process_starttime(std::process::id()).unwrap_or(1);
+        fs::write(
+            tmp.path().join("run.pid"),
+            format!("{}:{real}", std::process::id()),
+        )
+        .unwrap();
+        assert!(
+            !State::stale_run(tmp.path()),
+            "alive pid with matching starttime is running — not stale"
+        );
     }
 
     /// Round-34: the v1 minimal meta.json contract lock — a meta with only

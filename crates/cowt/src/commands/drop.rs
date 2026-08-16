@@ -75,8 +75,14 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
     // With a degraded meta (corrupt meta.json, --force) the target is
     // unknown: no mount check is possible, and the `real`-dir guard below
     // is the remaining data-loss protection.
-    let mut foreign_mount = false;
     if target_known {
+        // tearing down CONCURRENTLY (child died, unmount+pidfile-clear in
+        // flight): mid-teardown the mount is up with no stale pidfile and no
+        // real dir yet, which would otherwise be misjudged "foreign" (round-37
+        // CI: drop --force raced a dying run parent and refused to unmount our
+        // own leftover). Only after the full retry window with NO ownership
+        // proof appearing is the mount declared foreign.
+        let mut proved_ours = false;
         for _ in 0..30 {
             if !backend.is_mounted(&meta.target) {
                 break;
@@ -88,34 +94,38 @@ pub fn drop_cmd(args: DropArgs) -> Result<()> {
             // does not authorize tearing down a foreign filesystem mounted
             // at the target later (D-005 boundary, round-31).
             let ours = mount_is_ours(&meta.target);
-            if !own_leftover || !ours {
-                foreign_mount = true;
-                break;
-            }
-            if !args.force {
-                bail!(
-                    "{} is still mounted; refusing to drop. Unmount it or use --force.",
-                    meta.target.display()
+            if own_leftover && ours {
+                proved_ours = true;
+                if !args.force {
+                    bail!(
+                        "{} is still mounted; refusing to drop. Unmount it or use --force.",
+                        meta.target.display()
+                    );
+                }
+                eprintln!(
+                    "cowt: --force: unmounting {}",
+                    crate::state::sanitize_display(&meta.target.display().to_string())
                 );
+                let _ = backend.unmount(&meta.target); // tolerate races; verify below
+                std::thread::sleep(std::time::Duration::from_millis(100));
+            } else {
+                // Not proven ours YET: a concurrent teardown may still write
+                // the proof (stale pidfile appears after the child dies).
+                // Keep waiting instead of instantly declaring foreign.
+                std::thread::sleep(std::time::Duration::from_millis(100));
             }
-            eprintln!(
-                "cowt: --force: unmounting {}",
-                crate::state::sanitize_display(&meta.target.display().to_string())
-            );
-            let _ = backend.unmount(&meta.target); // tolerate races; verify below
-            std::thread::sleep(std::time::Duration::from_millis(100));
         }
-        if foreign_mount || backend.is_mounted(&meta.target) {
-            if dir.join("real").exists() {
-                // Our own stale state: the mount could not be torn down because
-                // something blocks the target (external dir, permissions).
-                bail!(
-                    "{} is blocked by leftover state (host dir still moved aside at {}); \
-                     clear the blocker at the mount point, then drop again",
-                    meta.target.display(),
-                    dir.join("real").display()
-                );
-            }
+        if backend.is_mounted(&meta.target) && !proved_ours && dir.join("real").exists() {
+            // Our own stale state: the mount could not be torn down because
+            // something blocks the target (external dir, permissions).
+            bail!(
+                "{} is blocked by leftover state (host dir still moved aside at {}); \
+                 clear the blocker at the mount point, then drop again",
+                meta.target.display(),
+                dir.join("real").display()
+            );
+        }
+        if backend.is_mounted(&meta.target) && !proved_ours {
             bail!(
                 "{} is mounted by something else (not a cowt leftover); refusing to unmount it",
                 meta.target.display()
