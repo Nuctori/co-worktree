@@ -507,7 +507,52 @@ pub fn mount_upper_matches_proc(mountpoint: &Path, upper: &Path) -> bool {
         if fields.next() != Some(target.as_str()) {
             return false;
         }
+        // /proc/self/mounts rows are `device mountpoint fstype options dump
+        // pass`: skip fstype (field 3) before reading options (field 4).
+        // Reading field 3 instead made the upperdir proof never match
+        // (audit R36 fix verification).
+        fields.next();
         let options = fields.next().unwrap_or("");
         options.split(',').any(|o| o == want)
     })
+}
+
+#[cfg(test)]
+mod mounts_tests {
+    use super::*;
+
+    /// Round-36: the upperdir ownership proof must read the OPTIONS field
+    /// (4th) of /proc/self/mounts, not the fstype field (3rd) — a field
+    /// offset bug made the whole proof dead code (independent audit
+    /// verification, fixed after R36 shipped).
+    #[test]
+    fn mount_upper_matches_parses_options_field() {
+        let mnt = Path::new("/tmp/d");
+        let upper = Path::new("/tmp/s/abc/u");
+        // Simulated /proc/self/mounts rows. Row 1: ours (upperdir matches).
+        let row_ours = "overlay /tmp/d overlay rw,lowerdir=/tmp/base,upperdir=/tmp/s/abc/u,workdir=/tmp/s/abc/w 0 0";
+        // Row 2: same mountpoint but a DIFFERENT upperdir — must NOT match.
+        let row_other = "overlay /tmp/d overlay rw,upperdir=/other/u 0 0";
+        // Row 3: same upperdir but different mountpoint — must NOT match.
+        let row_other_mnt = "overlay /tmp/other overlay rw,upperdir=/tmp/s/abc/u 0 0";
+        assert!(mount_upper_matches_line(row_ours, mnt, upper));
+        assert!(!mount_upper_matches_line(row_other, mnt, upper));
+        assert!(!mount_upper_matches_line(row_other_mnt, mnt, upper));
+        // fstype field must not be misread as options: "overlay" != any option.
+        let row_fstype_only = "overlay /tmp/d overlay 0 0";
+        assert!(!mount_upper_matches_line(row_fstype_only, mnt, upper));
+    }
+
+    fn mount_upper_matches_line(line: &str, mountpoint: &Path, upper: &Path) -> bool {
+        let target = mountpoint.to_string_lossy().replace(' ', "\\040");
+        let want = format!("upperdir={}", upper.to_string_lossy().replace(' ', "\\040"));
+        let mut fields = line.split_whitespace();
+        fields.next(); // device
+        if fields.next() != Some(target.as_str()) {
+            return false;
+        }
+        fields.next(); // fstype
+        let options = fields.next().unwrap_or("");
+        options.split(',').any(|o| o == want)
+    }
 }

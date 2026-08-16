@@ -391,6 +391,20 @@ All notable changes to co-worktree are documented here.
 
 ### Known limitations
 
+- Crash windows with manual-only recovery (round-36, not auto-healed):
+  - Windows: a kill -9 between `do_rename`'s two renames (dest→`*.cowt-old-<pid>` backup, then staged→dest) leaves the target missing and a
+    `.cowt-old-<pid>` backup file; the next apply reports a permanent
+    Delete-vs-modify conflict. Recovery: `mv <target>.cowt-old-<pid> <target>`
+    (the backup IS the pre-apply data) — a later apply will re-plan cleanly.
+  - `fork`: a kill -9 between the state-dir create and `create_dir_all(upper)`
+    leaves an empty id dir; it is resolvable for `drop --force` only when a
+    meta.json exists. If no meta.json was written yet, remove the empty dir
+    by hand.
+  - `drop`: a kill -9 between rename-to-trash and the deletion leaves a
+    `.trash-*` dir that `resolve` refuses (by design) and `list` hides.
+    `drop` of another worktree sweeps it; with a single worktree, remove it
+    by hand (but never delete one holding a `real/` subdir — that is the
+    moved-aside host directory).
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX
   programs work normally. FUSE-T's NFS mount does not come up on headless
   GitHub Actions runners (fuse_mount returns but the mount never appears in

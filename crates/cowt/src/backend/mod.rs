@@ -38,6 +38,15 @@ pub(crate) fn install_signal_forwarding() {
                 libc::kill(pid, sig);
                 libc::alarm(3);
             }
+        } else {
+            // No child tracked (diff/apply/fork/list...): restore the
+            // default disposition and re-raise so Ctrl-C still interrupts
+            // long scans. Without this, the handler swallows the signal
+            // and non-run commands become uninterruptible (round-37 note).
+            unsafe {
+                libc::signal(sig, libc::SIG_DFL);
+                libc::raise(sig);
+            }
         }
     }
     extern "C" fn escalate(_: libc::c_int) {
@@ -75,8 +84,13 @@ pub(crate) fn install_signal_forwarding() {
                 // Round-28: don't leak the process handle on every Ctrl-C.
                 let _ = unsafe { CloseHandle(h) };
             }
+            windows::core::BOOL(1) // handled: let the main thread reap and tear down
+        } else {
+            // No child tracked: not handled — let the default console
+            // behavior terminate the process (Ctrl-C must still interrupt
+            // diff/apply/fork scans; round-37 note).
+            windows::core::BOOL(0)
         }
-        windows::core::BOOL(1) // handled: let the main thread reap and tear down
     }
     unsafe {
         use windows::Win32::System::Console::SetConsoleCtrlHandler;
