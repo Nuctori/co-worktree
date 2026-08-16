@@ -21,23 +21,33 @@ use walkdir::WalkDir;
 use crate::error::{Error, Result};
 
 /// Kind of a manifest entry.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum EntryKind {
+    #[default]
     File,
     Dir,
     Symlink,
 }
 
 /// Metadata for a single path in the snapshot.
+///
+/// ALL fields carry `#[serde(default)]`: adding a field to this struct must
+/// not make every pre-existing manifest unreadable — a new field without a
+/// default is a forward-compat break (round-34). New fields MUST follow
+/// this pattern.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Entry {
+    #[serde(default)]
     pub kind: EntryKind,
     /// File size in bytes (0 for dirs/symlinks).
+    #[serde(default)]
     pub size: u64,
     /// Unix permission bits (0 on platforms without them).
+    #[serde(default)]
     pub mode: u32,
     /// Modification time, nanoseconds since UNIX epoch (best effort).
+    #[serde(default)]
     pub mtime_ns: i128,
     /// BLAKE3 hex digest of the contents. Only present for files.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -99,13 +109,28 @@ impl Entry {
 /// A metadata-only snapshot of one directory tree.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Manifest {
+    /// Format version. Omitted when 1 (the only version this binary
+    /// understands) so existing manifests stay byte-identical; a future
+    /// incompatible format bumps it and old binaries refuse loudly instead
+    /// of misreading (round-34).
+    #[serde(default = "default_format_version", skip_serializing_if = "is_v1")]
+    pub version: u32,
     /// Absolute path of the snapshotted directory.
     pub base: PathBuf,
-    /// Creation time, seconds since UNIX epoch.
+    /// When this scan ran, seconds since UNIX epoch (NOT the fork time:
+    /// every scan/rescan re-stamps it — round-34).
     pub created_epoch: u64,
     /// Relative path -> entry. Symlinks are leaf entries, never traversed.
     #[serde(deserialize_with = "deserialize_entries")]
     pub entries: BTreeMap<PathBuf, Entry>,
+}
+
+fn default_format_version() -> u32 {
+    1
+}
+
+fn is_v1(v: &u32) -> bool {
+    *v == 1
 }
 
 /// Custom `entries` deserializer: rejects duplicate path keys, which
@@ -310,6 +335,7 @@ impl Manifest {
 
         Ok(ScanOutcome {
             manifest: Manifest {
+                version: 1,
                 base,
                 created_epoch,
                 entries,
@@ -327,10 +353,36 @@ impl Manifest {
     pub fn from_json(s: &str) -> Result<Manifest> {
         let m: Manifest =
             serde_json::from_str(s).map_err(|e| Error::CorruptManifest(e.to_string()))?;
+        // A future format version must fail LOUDLY and distinctly — the
+        // file is not corrupt, it is newer than this binary. Misreporting
+        // it as corruption would push users toward `drop --force`, which
+        // would destroy a healthy worktree (round-34).
+        if m.version > 1 {
+            return Err(Error::UnsupportedFormat(format!(
+                "manifest format version {} (this binary supports up to 1); \
+                 written by a newer cowt — upgrade or restore the old manifest",
+                m.version
+            )));
+        }
         // Path keys must respect the same invariants the scanner enforces
         // (relative, no `.`/`..`/empty components): a corrupt key would
         // otherwise turn a real worktree change into a misleading
-        // both_added conflict or a silent no-op (round-23).
+        // both_added conflict or a silent no-op (round-23). On macOS, also
+        // NFC-normalize like the scanner does, so manifests written before
+        // round-29 (or hand-edited with NFD keys) match the rescan key set
+        // — otherwise the same file appears as Deleted+Added (round-34).
+        #[cfg(target_os = "macos")]
+        let entries: BTreeMap<PathBuf, Entry> = m
+            .entries
+            .into_iter()
+            .map(|(k, v)| {
+                let s = k.to_string_lossy();
+                let nfc = unicode_normalization::UnicodeNormalization::nfc(&*s).collect::<String>();
+                (PathBuf::from(nfc), v)
+            })
+            .collect();
+        #[cfg(target_os = "macos")]
+        let m = Manifest { entries, ..m };
         for rel in m.entries.keys() {
             if rel.as_os_str().is_empty()
                 || rel.is_absolute()

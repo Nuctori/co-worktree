@@ -21,20 +21,30 @@ use serde::{Deserialize, Serialize};
 
 /// Lifecycle status persisted in meta.json. "running" is derived from the
 /// pidfile at runtime, never stored.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum Status {
+    #[default]
     Ready,
     Applied,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorktreeMeta {
+    #[serde(default)]
     pub id: String,
+    // `Option` is NOT optional in serde — a missing field errors unless
+    // defaulted. All fields carry `#[serde(default)]` so adding one never
+    // makes existing meta.json files unreadable (round-34).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    #[serde(default)]
     pub target: PathBuf,
+    #[serde(default)]
     pub created_epoch: u64,
+    #[serde(default)]
     pub status: Status,
+    #[serde(default)]
     pub backend: String,
 }
 
@@ -565,5 +575,22 @@ mod tests {
         // Ours matches -> removed.
         State::clear_running_if_owned(tmp.path(), std::process::id());
         assert!(!tmp.path().join("run.pid").exists());
+    }
+
+    /// Round-34: the v1 minimal meta.json contract lock — a meta with only
+    /// the original fields must parse; missing optional `name` yields None
+    /// (serde's Option-without-default trap is locked so future fields
+    /// follow the #[serde(default)] pattern).
+    #[test]
+    fn v1_minimal_meta_contract_lock() {
+        let minimal = r#"{"id":"abc","name":"demo","target":"/x","created_epoch":0,"status":"ready","backend":"test"}"#;
+        let m: WorktreeMeta = serde_json::from_str(minimal).unwrap();
+        assert_eq!(m.id, "abc");
+        assert_eq!(m.status, Status::Ready);
+        // Missing name (Option without default previously errored).
+        let noname =
+            r#"{"id":"abc","target":"/x","created_epoch":0,"status":"ready","backend":"test"}"#;
+        let m: WorktreeMeta = serde_json::from_str(noname).unwrap();
+        assert_eq!(m.name, None);
     }
 }

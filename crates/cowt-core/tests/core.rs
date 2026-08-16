@@ -1904,3 +1904,66 @@ fn nfc_nfd_are_distinct_keys_on_unix() {
     assert!(m.get(Path::new("caf\u{e9}.txt")).is_some());
     assert!(m.get(Path::new("cafe\u{301}.txt")).is_some());
 }
+
+// ---------------------------------------------------------------- R34
+
+/// Round-34: a manifest claiming a NEWER format version must fail loudly
+/// and distinctly ("unsupported format", not "corrupt") — the recovery
+/// guidance for corruption is `drop --force`, which would destroy a
+/// healthy worktree.
+#[test]
+fn from_json_rejects_newer_format_version() {
+    let v2 = r#"{"version":2,"base":"/x","created_epoch":0,"entries":{}}"#;
+    let err = Manifest::from_json(v2).unwrap_err();
+    let msg = err.to_string();
+    assert!(
+        msg.contains("unsupported") && msg.contains("newer cowt"),
+        "newer-format error must be distinguishable: {msg}"
+    );
+    // Version 1 (or missing) still parses.
+    let v1 = r#"{"version":1,"base":"/x","created_epoch":0,"entries":{}}"#;
+    assert!(Manifest::from_json(v1).is_ok());
+    let nover = r#"{"base":"/x","created_epoch":0,"entries":{}}"#;
+    assert!(Manifest::from_json(nover).is_ok());
+}
+
+/// Round-34: the v1 minimal manifest contract lock — a manifest containing
+/// ONLY the original fields must parse. Adding a new field WITHOUT
+/// `#[serde(default)]` breaks this test, forcing the forward-compat pattern.
+#[test]
+fn v1_minimal_manifest_contract_lock() {
+    let minimal = r#"{"base":"/x","created_epoch":0,"entries":{
+        "f.txt":{"kind":"file","size":3,"mode":0,"mtime_ns":0,"hash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+    }}"#;
+    let m = Manifest::from_json(minimal).unwrap();
+    assert_eq!(m.version, 1);
+    assert_eq!(m.entries.len(), 1);
+    assert_eq!(m.get(Path::new("f.txt")).unwrap().size, 3);
+}
+
+/// Round-34: manifest to_json -> from_json round-trip preserves the full
+/// entry set (not just one symlink target as before).
+#[test]
+fn manifest_round_trip_full_entries() {
+    let tmp = TempDir::new().unwrap();
+    let d = tmp.path().join("d");
+    fs::create_dir_all(&d).unwrap();
+    write(&d, "a.txt", "content-a");
+    write(&d, "b.txt", "content-b");
+    fs::create_dir_all(d.join("sub")).unwrap();
+    write(&d, "sub/c.txt", "content-c");
+    let m1 = Manifest::scan(&d).unwrap().manifest;
+    let json = m1.to_json().unwrap();
+    let m2 = Manifest::from_json(&json).unwrap();
+    assert_eq!(m1.entries.len(), m2.entries.len());
+    assert_eq!(
+        m1.entries.keys().collect::<Vec<_>>(),
+        m2.entries.keys().collect::<Vec<_>>()
+    );
+    for (k, e1) in &m1.entries {
+        let e2 = m2.get(k).unwrap();
+        assert_eq!(e1.size, e2.size);
+        assert_eq!(e1.hash, e2.hash);
+        assert_eq!(e1.kind, e2.kind);
+    }
+}

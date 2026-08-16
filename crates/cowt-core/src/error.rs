@@ -18,6 +18,9 @@ pub enum Error {
     #[error("manifest is corrupted: {0}")]
     CorruptManifest(String),
 
+    #[error("unsupported manifest format: {0}")]
+    UnsupportedFormat(String),
+
     #[error("merge has {0} conflict(s); target environment was not modified")]
     Conflicts(usize),
 

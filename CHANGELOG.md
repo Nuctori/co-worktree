@@ -323,6 +323,25 @@ All notable changes to co-worktree are documented here.
   trash-name refusal, created line parity, sanitization, upper
   unreadability.
 
+### Added — round 34 (manifest versioning & forward-compat contracts)
+
+- `Manifest` carries a format `version` (default 1, omitted from output):
+  a file written by a NEWER cowt now fails with a distinct
+  "unsupported manifest format ... written by a newer cowt" error instead
+  of being misreported as corrupt (which would have steered users to
+  `drop --force` and destroyed a healthy worktree).
+- All `Entry`/`WorktreeMeta` fields now carry `#[serde(default)]` — adding
+  a field can no longer silently make every pre-existing manifest/meta
+  unreadable (the `Option`-without-default serde trap is closed for
+  `name` too). Locked by "v1 minimal contract" tests that fail the moment
+  someone adds a field without a default.
+- macOS: `from_json` NFC-normalizes path keys like the scanner does —
+  pre-round-29 manifests (or hand-edited NFD keys) no longer produce
+  phantom Deleted+Added pairs against a fresh rescan.
+- Regression locks: newer-version rejection, v1 minimal manifest and meta
+  contracts, full-entry round-trip (previously only one symlink target
+  was round-tripped).
+
 ### Known limitations
 
 - macOS: Apple's file APIs (Finder etc.) handle FUSE mounts poorly; POSIX
