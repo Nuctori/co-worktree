@@ -4,7 +4,7 @@
 //!   * identity:  fold(base, ∅) == base
 //!   * idempotence: fold(fold(base,U),U) == fold(base,U)
 //!   * associativity/commutativity of disjoint union:
-//!       fold(fold(base,A),B) == fold(base,A∪B)   (A,B share NO keys)
+//!   * fold(fold(base,A),B) == fold(base,A∪B)   (A,B share NO keys)
 //!
 //! A9 (bounded-monotonic + whiteout-exact):
 //!   * every base entry upper neither deletes nor overrides survives verbatim

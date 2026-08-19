@@ -21,7 +21,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use cowt_core::diff::{self, ChangeKind};
-use cowt_core::manifest::{Entry, EntryKind, Manifest};
+use cowt_core::manifest::Manifest;
 use cowt_core::merge;
 use cowt_core::overlay;
 use proptest::prelude::*;

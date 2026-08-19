@@ -124,12 +124,12 @@ fn check_a4(base: &Manifest, work: &Manifest, changes: &[Change]) -> Result<(), 
         prop_assert_eq!(&c.kind, exp, "A4(c): wrong kind at {}", c.path.display());
         match c.kind {
             ChangeKind::Added => prop_assert!(
-                base.entries.get(&c.path).is_none(),
+                !base.entries.contains_key(&c.path),
                 "A4(c): Added {} must be absent in base",
                 c.path.display()
             ),
             ChangeKind::Deleted => prop_assert!(
-                work.entries.get(&c.path).is_none(),
+                !work.entries.contains_key(&c.path),
                 "A4(c): Deleted {} must be absent in work",
                 c.path.display()
             ),
