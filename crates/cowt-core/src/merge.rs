@@ -84,6 +84,14 @@ pub struct MergePlan {
     /// (round-24).
     #[serde(skip)]
     pub expected_current: std::collections::BTreeMap<PathBuf, Entry>,
+    /// Directories that ended up empty because every entry under them was
+    /// deleted AND the directory itself is absent from the realized `work`
+    /// tree. `execute` removes exactly these, deepest-first, so deleting a
+    /// *file* never drops a parent directory that overlayfs still keeps as
+    /// an empty dir (adversarial A1: base={a/a,b}, delete a/a must not leave
+    /// a phantom `Deleted:a` after re-diff).
+    #[serde(skip)]
+    pub empty_parents: std::collections::BTreeSet<PathBuf>,
 }
 
 impl MergePlan {
@@ -224,6 +232,28 @@ pub fn plan(base: &Manifest, current: &Manifest, work: &Manifest, work_root: &Pa
             out.expected_current.insert(path.clone(), e.clone());
         }
     }
+    // Empty-parent pruning (execute's final phase): a directory may be
+    // removed only when it is absent from the realized WORK tree. Deleting a
+    // *file* must NOT delete its parent directory if that directory survives
+    // in `work` as an (empty) directory — overlayfs keeps it and re-diffing
+    // the realized view must not report a phantom Deleted for it (A1 of the
+    // adversarial diff-algebra audit: base={a/a,b}, delete a/a left a
+    // phantom `Deleted:a` because execute unconditionally pruned every
+    // parent of a Delete op, dropping the legitimate empty dir `a`).
+    let mut empty_parents: BTreeSet<PathBuf> = BTreeSet::new();
+    for op in &out.operations {
+        if let Operation::Delete { path, .. } = op {
+            if let Some(parent) = path.parent() {
+                if !parent.as_os_str().is_empty()
+                    && base.entries.contains_key(parent)
+                    && !work.entries.contains_key(parent)
+                {
+                    empty_parents.insert(parent.to_path_buf());
+                }
+            }
+        }
+    }
+    out.empty_parents = empty_parents;
     out
 }
 
@@ -565,15 +595,10 @@ fn execute_inner(plan: &MergePlan, target_root: &Path, staging: &Path) -> Result
         }
     }
     // Prune directories left empty by deletions (deepest first), but never the
-    // target root itself.
-    let mut dirs: Vec<PathBuf> = plan
-        .operations
-        .iter()
-        .filter_map(|op| match op {
-            Operation::Delete { path, .. } => path.parent().map(|p| p.to_path_buf()),
-            _ => None,
-        })
-        .collect();
+    // target root itself. Only directories that the planner marked empty
+    // (absent from the realized `work` tree) are removed — a deleted *file*
+    // never drags a still-kept empty directory down with it (adversarial A1).
+    let mut dirs: Vec<PathBuf> = plan.empty_parents.iter().cloned().collect();
     dirs.sort_by_key(|p| std::cmp::Reverse(p.components().count()));
     dirs.dedup();
     for d in dirs {
