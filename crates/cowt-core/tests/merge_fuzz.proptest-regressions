@@ -1,0 +1,8 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc 54b274a66e2215f60d815499d03562d2cb908be57fb52a7dca560d96f771eaa9 # shrinks to base = Manifest { version: 1, base: "/base", created_epoch: 0, entries: {"a": Entry { kind: File, size: 1, mode: 420, mtime_ns: 0, hash: Some("0000000000000000000000000000000000000000000000000000000000000000"), link_target: None }} }, current = Manifest { version: 1, base: "/base", created_epoch: 0, entries: {} }, work = Manifest { version: 1, base: "/base", created_epoch: 0, entries: {} }
+cc 653dc7d1605943c36f430cacf125cf6a39125892e030c6eb51ebc6bfe60a7c79 # shrinks to base = Manifest { version: 1, base: "/base", created_epoch: 0, entries: {"g": Entry { kind: Symlink, size: 0, mode: 0, mtime_ns: 0, hash: None, link_target: Some("target") }} }, current = Manifest { version: 1, base: "/base", created_epoch: 0, entries: {"g": Entry { kind: Symlink, size: 0, mode: 0, mtime_ns: 0, hash: None, link_target: Some("target") }} }, work = Manifest { version: 1, base: "/base", created_epoch: 0, entries: {"g": Entry { kind: File, size: 1, mode: 420, mtime_ns: 0, hash: Some("0000000000000000000000000000000000000000000000000000000000000000"), link_target: None }} }

@@ -222,7 +222,14 @@ fn collect_whiteouts(
             let name = item.file_name();
             let Some(name) = name.to_str() else { continue };
 
-            if name == OPAQUE_MARKER && is_whiteout(&path) {
+            // Opaque marker: `.wh..wh..opq`. Detected as a zero-size regular
+            // file (the only encoding the winfsp/macos/unprivileged-fuse
+            // backends can produce) OR as a char device 0:0 (privileged
+            // kernel overlayfs). The char-device-only check used here before
+            // missed the regular-file marker entirely, so base entries under
+            // an opaque dir survived deletion on those backends — a silent
+            // data-loss / phantom-change bug (adversarial audit round 1).
+            if name == OPAQUE_MARKER && is_opaque_marker(&path) {
                 if let Ok(rel) = path.strip_prefix(root) {
                     if let Some(parent) = rel.parent() {
                         opaque_dirs.push(parent.to_path_buf());
@@ -294,6 +301,28 @@ fn is_whiteout(_path: &Path) -> bool {
 /// zero-size regular files (same convention as the fuse-overlayfs fallback).
 #[cfg(not(unix))]
 fn is_wh_prefixed_whiteout(path: &Path) -> bool {
+    std::fs::symlink_metadata(path)
+        .map(|m| m.is_file() && m.len() == 0)
+        .unwrap_or(false)
+}
+
+/// Opaque marker (`.wh..wh..opq`): a zero-size regular file on the
+/// unprivileged / winfsp / macOS / fuse-overlayfs-fallback backends, or a
+/// char device 0:0 on privileged kernel overlayfs. The zero-size regular-file
+/// case is the one real backends actually emit, so it MUST be detected — the
+/// previously char-device-only check made opaque dirs no-ops on every
+/// unprivileged host (adversarial audit round 1).
+#[cfg(unix)]
+fn is_opaque_marker(path: &Path) -> bool {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+    let Ok(m) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    (m.file_type().is_char_device() && m.rdev() == 0) || (m.file_type().is_file() && m.size() == 0)
+}
+
+#[cfg(not(unix))]
+fn is_opaque_marker(path: &Path) -> bool {
     std::fs::symlink_metadata(path)
         .map(|m| m.is_file() && m.len() == 0)
         .unwrap_or(false)

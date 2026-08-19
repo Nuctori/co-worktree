@@ -180,8 +180,13 @@ pub fn plan(base: &Manifest, current: &Manifest, work: &Manifest, work_root: &Pa
             continue;
         }
         if c_eq_w {
-            // Both sides ended up identical.
-            if b.is_some() || c.is_some() {
+            // Both sides ended up identical AND still present (a non-None entry
+            // on both). A path deleted on BOTH sides is a no-op (nothing
+            // converged — it simply does not exist), not convergence; counting
+            // it would inflate the "N converged" summary and mislead the user
+            // into thinking a change was applied (round-2 fuzz: base={a},
+            // current={}, work={} must NOT report a as converged).
+            if c.is_some() && w.is_some() {
                 out.converged.push(path);
             }
             continue;

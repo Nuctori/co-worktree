@@ -934,4 +934,95 @@ mod tests {
             "user dir matching the name pattern must never be deleted"
         );
     }
+
+    // ─────────────────────────────────────────────────────────────────────
+    // ADVERSARIAL AUDIT ROUND 5: the resolve() path-traversal boundary and
+    // id/name validation. A hostile id must NEVER resolve to a path outside
+    // the state root — drop --force would otherwise delete arbitrary dirs.
+    // ─────────────────────────────────────────────────────────────────────
+
+    #[test]
+    fn resolve_rejects_traversal_and_separators() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = State {
+            root: tmp.path().to_path_buf(),
+        };
+        for bad in [
+            "..",
+            "../victim",
+            "a/..",
+            "a/b",
+            "a\\b",
+            "..\\victim",
+            ".trash-evil",
+        ] {
+            assert!(
+                state.resolve(bad).is_err(),
+                "resolve must reject hostile id {bad:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn resolved_path_is_always_inside_state_root() {
+        let tmp = tempfile::tempdir().unwrap();
+        let state = State {
+            root: tmp.path().to_path_buf(),
+        };
+        // A legit worktree dir.
+        let id = "0123456789abcdef";
+        fs::create_dir_all(state.dir(id).join("upper")).unwrap();
+        fs::write(
+            state.dir(id).join("meta.json"),
+            format!(
+                r#"{{"id":"{id}","name":"demo","target":"/x","created_epoch":0,"status":"ready","backend":"test"}}"#
+            ),
+        )
+        .unwrap();
+        let resolved = state.resolve(id).unwrap();
+        assert!(
+            resolved.starts_with(state.root()),
+            "resolved path {resolved:?} must stay inside state root {:?}",
+            state.root()
+        );
+        // Even a name lookup of a forged meta cannot escape: the on-disk id is
+        // validated by list(), so name lookups join only valid ids.
+    }
+
+    #[test]
+    fn valid_id_or_name_rejects_hostile_inputs() {
+        for bad in [
+            "",
+            ".",
+            "..",
+            "a/b",
+            "a\\b",
+            "..\\x",
+            ".trash-x",
+            "has\nnewline",
+            "has\ttab",
+            "with\x07bell",
+        ] {
+            assert!(!valid_id_or_name(bad), "valid_id_or_name must reject {bad:?}");
+        }
+        // Legit single-component ids/names are accepted.
+        for ok in ["demo", "0123456789abcdef", "my-worktree", "App_Config"] {
+            assert!(valid_id_or_name(ok), "valid_id_or_name must accept {ok:?}");
+        }
+    }
+
+    #[test]
+    fn sweep_stale_staging_never_touches_user_dir_without_marker() {
+        let tmp = tempfile::tempdir().unwrap();
+        // A dir that LOOKS like a staging dir (dead pid) but has no marker:
+        // a real user directory named to evade the pattern. It must survive.
+        let lookalike = tmp.path().join(".cowt-apply-999999999-1");
+        fs::create_dir_all(&lookalike).unwrap();
+        fs::write(lookalike.join("important-data.txt"), b"do-not-delete").unwrap();
+        sweep_stale_staging(tmp.path());
+        assert!(
+            lookalike.join("important-data.txt").exists(),
+            "user dir without .cowt-staging marker must never be deleted"
+        );
+    }
 }
