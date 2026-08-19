@@ -56,6 +56,13 @@ All notable changes to co-worktree are documented here.
   process whose pid was reused after a crash) now works — the pidfile
   starttime comes from `proc_pidinfo(PROC_PIDT_SHORTBSDINFO)`, with the FFI
   layout pinned by a size/offset unit test.
+- Opaque-directory marker detection now accepts a zero-size regular file
+  (what WinFsp/macOS/fuse-overlayfs actually emit) in addition to a
+  char-device 0:0, so base entries under an opaque directory are correctly
+  deleted instead of silently surviving on unprivileged backends.
+- Three-way merge no longer miscounts a path deleted on both base and
+  worktree as converged; the convergence counter now requires both current
+  and worktree sides to still be present (`c.is_some() && w.is_some()`).
 
 ### Added — round 21 (CRLF / line-ending / empty-file boundaries)
 
