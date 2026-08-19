@@ -125,6 +125,7 @@ fn diff_signature(changes: &[diff::Change]) -> BTreeSet<String> {
 /// re-diff the realized host against base and compare to the original diff.
 /// Returns the two signatures so callers can assert. Panics (via prop) on a
 /// genuine product defect (phantom or lost change on realization).
+#[allow(clippy::too_many_arguments)]
 fn a1_round_trip(
     base_paths: &[PathBuf],
     base_content: &[String],
