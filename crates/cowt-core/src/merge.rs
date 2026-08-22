@@ -700,6 +700,19 @@ fn verify_unchanged(plan: &MergePlan, target_root: &Path, rel: &Path) -> Result<
     let meta = match fs::symlink_metadata(&dest) {
         Ok(m) => m,
         Err(_) => {
+            // Kind-migration (symlink/file <-> dir) deletes: the Delete phase
+            // already removed the old entry, and WriteFile/WriteSymlink is
+            // about to recreate the same path. That is a planned self-removal,
+            // not an out-of-band host edit, so it must not be mistaken for a
+            // TOCTOU disappearance and abort (otherwise symlink->file migration
+            // can never commit, see apply_audit.rs R4-E). The old entry's kind
+            // differs from the new write anyway, so content verification is
+            // meaningless here.
+            if plan.operations.iter().any(|op| {
+                matches!(op, Operation::Delete { path, migration: true } if path.as_path() == rel)
+            }) {
+                return Ok(());
+            }
             return Err(Error::io(
                 dest,
                 std::io::Error::other("path disappeared from the host after planning; aborting"),
