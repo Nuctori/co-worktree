@@ -716,7 +716,7 @@ fn verify_unchanged(plan: &MergePlan, target_root: &Path, rel: &Path) -> Result<
             return Err(Error::io(
                 dest,
                 std::io::Error::other("path disappeared from the host after planning; aborting"),
-            ))
+            ));
         }
     };
     let mtime_ns = meta
