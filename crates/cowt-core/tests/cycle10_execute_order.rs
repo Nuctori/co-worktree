@@ -20,8 +20,7 @@ use tempfile::TempDir;
 
 fn write(root: &Path, rel: &str, content: &str) {
     let p = root.join(rel);
-    if p
-        .parent()
+    if p.parent()
         .map(|pp| fs::create_dir_all(pp).is_err())
         .unwrap_or(true)
     {
@@ -235,6 +234,12 @@ fn whiteout_dir_then_recreate_child_under_opaque() {
     let plan = merge::plan(&base_m, &scan(&host), &work, &upper);
     assert!(plan.is_clean());
     merge::execute(&plan, &host).unwrap();
-    assert_eq!(fs::read_to_string(host.join("sub/new.txt")).unwrap(), "fresh");
-    assert!(!host.join("sub/deep.txt").exists(), "opaque must drop base child");
+    assert_eq!(
+        fs::read_to_string(host.join("sub/new.txt")).unwrap(),
+        "fresh"
+    );
+    assert!(
+        !host.join("sub/deep.txt").exists(),
+        "opaque must drop base child"
+    );
 }

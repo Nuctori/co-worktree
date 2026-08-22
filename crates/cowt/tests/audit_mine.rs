@@ -20,7 +20,12 @@ impl Env {
         let app = home.join(".config").join(tag);
         fs::create_dir_all(&home).unwrap();
         fs::create_dir_all(&app).unwrap();
-        Env { tmp, home, state, app }
+        Env {
+            tmp,
+            home,
+            state,
+            app,
+        }
     }
     fn run(&self, args: &[&str]) -> std::process::Output {
         Command::new(env!("CARGO_BIN_EXE_cowt"))
@@ -33,13 +38,21 @@ impl Env {
     }
     fn run_ok(&self, args: &[&str]) -> String {
         let o = self.run(args);
-        assert!(o.status.success(), "cowt {:?} failed: {}", args, String::from_utf8_lossy(&o.stderr));
+        assert!(
+            o.status.success(),
+            "cowt {:?} failed: {}",
+            args,
+            String::from_utf8_lossy(&o.stderr)
+        );
         String::from_utf8_lossy(&o.stdout).into_owned()
     }
     fn only_id(&self) -> String {
         let out = self.run_ok(&["list", "--json"]);
         let v: serde_json::Value = serde_json::from_str(&out).unwrap();
-        v.as_array().unwrap().first().unwrap()["id"].as_str().unwrap().to_string()
+        v.as_array().unwrap().first().unwrap()["id"]
+            .as_str()
+            .unwrap()
+            .to_string()
     }
     fn upper(&self, id: &str) -> std::path::PathBuf {
         self.state.join(id).join("upper")
@@ -72,8 +85,14 @@ fn cli_m_apply_writes_and_state_clean() {
     write_upper(&upper, "new.txt", "fresh\n");
     whiteout(&upper, "del.txt");
     env.run_ok(&["apply", &id]);
-    assert_eq!(fs::read_to_string(env.app.join("a.txt")).unwrap(), "v1new\n");
-    assert_eq!(fs::read_to_string(env.app.join("new.txt")).unwrap(), "fresh\n");
+    assert_eq!(
+        fs::read_to_string(env.app.join("a.txt")).unwrap(),
+        "v1new\n"
+    );
+    assert_eq!(
+        fs::read_to_string(env.app.join("new.txt")).unwrap(),
+        "fresh\n"
+    );
     assert!(!env.app.join("del.txt").exists());
     let out = env.run_ok(&["diff", &id, "--json"]);
     let v: serde_json::Value = serde_json::from_str(&out).unwrap();
@@ -95,7 +114,10 @@ fn cli_m_conflict_writes_nothing() {
     fs::write(env.app.join("shared.txt"), "host\n").unwrap();
     let real = env.run(&["apply", &id]);
     assert_eq!(real.status.code(), Some(3));
-    assert_eq!(fs::read_to_string(env.app.join("shared.txt")).unwrap(), "host\n");
+    assert_eq!(
+        fs::read_to_string(env.app.join("shared.txt")).unwrap(),
+        "host\n"
+    );
     assert!(!env.app.join("clean.txt").exists());
     env.run_ok(&["drop", &id]);
 }
@@ -120,5 +142,8 @@ fn cli_m_fork_refuses_outside_home() {
     fs::create_dir_all(&outside).unwrap();
     fs::write(outside.join("x.txt"), "x\n").unwrap();
     let out = env.run(&["fork", outside.to_str().unwrap(), "--name", "out"]);
-    assert!(!out.status.success(), "fork must refuse target outside $HOME");
+    assert!(
+        !out.status.success(),
+        "fork must refuse target outside $HOME"
+    );
 }

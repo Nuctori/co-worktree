@@ -100,7 +100,10 @@ fn a8_targeted_content_same_size_mtime_aborts_and_preserves() {
     set_mtime(&host.join("x.txt"), orig_mtime);
 
     let err = merge::execute(&plan, &host);
-    assert!(err.is_err(), "content-only (same size+mtime) host edit must abort");
+    assert!(
+        err.is_err(),
+        "content-only (same size+mtime) host edit must abort"
+    );
     assert_eq!(
         fs::read_to_string(host.join("x.txt")).unwrap(),
         "A9",
@@ -154,9 +157,12 @@ fn a8_targeted_mode_change_aborts_and_preserves() {
     let plan = merge::plan(&scan(&base), &scan(&host), &scan(&work), &work);
     assert!(plan.is_clean());
 
-    chmod_readonly(host.join("x.txt"));
+    chmod_readonly(&host.join("x.txt"));
     let err = merge::execute(&plan, &host);
-    assert!(err.is_err(), "host chmod in plan->execute window must abort");
+    assert!(
+        err.is_err(),
+        "host chmod in plan->execute window must abort"
+    );
     assert_eq!(fs::read_to_string(host.join("x.txt")).unwrap(), "v1");
 }
 
@@ -293,7 +299,7 @@ proptest! {
             3 => {
                 #[cfg(unix)]
                 {
-                    chmod_readonly(host.join(mutate_rel));
+                    chmod_readonly(&host.join(mutate_rel));
                     if mutate_file == target {
                         expected_abort = true;
                     }
@@ -376,7 +382,10 @@ fn a8_probe_unreadable_hash_none_degradation() {
     }
     // Restore readability and rewrite content, same size, forged mtime.
     fs::set_permissions(host.join("x.txt"), fs::Permissions::from_mode(0o644)).unwrap();
-    let orig = fs::symlink_metadata(host.join("x.txt")).unwrap().modified().unwrap();
+    let orig = fs::symlink_metadata(host.join("x.txt"))
+        .unwrap()
+        .modified()
+        .unwrap();
     fs::write(host.join("x.txt"), "A9").unwrap();
     set_mtime(&host.join("x.txt"), orig);
     let result = merge::execute(&plan, &host);

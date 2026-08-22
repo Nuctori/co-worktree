@@ -17,8 +17,7 @@ use tempfile::TempDir;
 
 fn write(root: &Path, rel: &str, content: &str) {
     let p = root.join(rel);
-    if p
-        .parent()
+    if p.parent()
         .map(|pp| fs::create_dir_all(pp).is_err())
         .unwrap_or(true)
     {
@@ -65,10 +64,7 @@ fn copy_tree(src: &Path, dst: &Path) {
 
 /// Generate a random-ish tree layout from a Vec of (relpath, content-or-deleted)
 /// using a small alphabet so keys collide and nest realistically.
-fn gen_tree(
-    root: &Path,
-    files: &[(String, Option<String>)],
-) {
+fn gen_tree(root: &Path, files: &[(String, Option<String>)]) {
     fs::create_dir_all(root).unwrap();
     for (rel, body) in files {
         if let Some(b) = body {
@@ -192,7 +188,10 @@ fn a6_dir_to_symlink_idempotent() {
     merge::execute(&plan, &host).unwrap();
     let realized = scan(&host);
     let plan2 = merge::plan(&base_m, &realized, &work, &upper);
-    assert!(plan2.operations.is_empty(), "dir->symlink must be idempotent");
+    assert!(
+        plan2.operations.is_empty(),
+        "dir->symlink must be idempotent"
+    );
 }
 
 #[test]
@@ -214,8 +213,14 @@ fn a6_host_only_addition_idempotent() {
     let plan = merge::plan(&base_m, &scan(&host), &work, &upper);
     assert!(plan.is_clean());
     merge::execute(&plan, &host).unwrap();
-    assert_eq!(fs::read_to_string(host.join("hostonly.txt")).unwrap(), "kept");
+    assert_eq!(
+        fs::read_to_string(host.join("hostonly.txt")).unwrap(),
+        "kept"
+    );
     let realized = scan(&host);
     let plan2 = merge::plan(&base_m, &realized, &work, &upper);
-    assert!(plan2.operations.is_empty(), "host-only addition must be idempotent");
+    assert!(
+        plan2.operations.is_empty(),
+        "host-only addition must be idempotent"
+    );
 }

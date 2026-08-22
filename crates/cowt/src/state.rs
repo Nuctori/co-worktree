@@ -1003,7 +1003,10 @@ mod tests {
             "has\ttab",
             "with\x07bell",
         ] {
-            assert!(!valid_id_or_name(bad), "valid_id_or_name must reject {bad:?}");
+            assert!(
+                !valid_id_or_name(bad),
+                "valid_id_or_name must reject {bad:?}"
+            );
         }
         // Legit single-component ids/names are accepted.
         for ok in ["demo", "0123456789abcdef", "my-worktree", "App_Config"] {

@@ -19,8 +19,7 @@ use tempfile::TempDir;
 
 fn write(root: &Path, rel: &str, content: &str) {
     let p = root.join(rel);
-    if p
-        .parent()
+    if p.parent()
         .map(|pp| fs::create_dir_all(pp).is_err())
         .unwrap_or(true)
     {
@@ -251,6 +250,10 @@ fn a10_all_three_different_is_conflict() {
     let work = overlay::effective_manifest_fold(&base_m, &upper, false).unwrap();
     let current_m = scan(&host);
     let plan = merge::plan(&base_m, &current_m, &work, &upper);
-    assert_eq!(plan.conflicts.len(), 1, "all-three-different must be exactly one conflict");
+    assert_eq!(
+        plan.conflicts.len(),
+        1,
+        "all-three-different must be exactly one conflict"
+    );
     assert!(plan.operations.is_empty());
 }

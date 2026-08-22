@@ -28,8 +28,7 @@ use tempfile::TempDir;
 /// the *scanned* manifest, so dropped paths stay consistent with reality.
 fn write(root: &Path, rel: &str, content: &str) {
     let p = root.join(rel);
-    if p
-        .parent()
+    if p.parent()
         .map(|pp| fs::create_dir_all(pp).is_err())
         .unwrap_or(true)
     {
@@ -101,7 +100,8 @@ fn check_a4(base: &Manifest, work: &Manifest, changes: &[Change]) -> Result<(), 
     let observed_paths: BTreeSet<&PathBuf> = changes.iter().map(|c| &c.path).collect();
     let expected_paths: BTreeSet<&PathBuf> = expected.keys().collect();
     prop_assert_eq!(
-        &observed_paths, &expected_paths,
+        &observed_paths,
+        &expected_paths,
         "A4(a): change-path set must equal the set of differing paths"
     );
 
@@ -348,7 +348,11 @@ fn a4_delete_with_parent_dir_stays() {
     let w = tmp.path().join("w");
     fs::create_dir_all(&b).unwrap();
     fs::create_dir_all(&w).unwrap();
-    tree_of(&b, &[("d/a.txt", "x"), ("d/b.txt", "y"), ("keep.txt", "k")], &[]);
+    tree_of(
+        &b,
+        &[("d/a.txt", "x"), ("d/b.txt", "y"), ("keep.txt", "k")],
+        &[],
+    );
     tree_of(&w, &[("d/b.txt", "y"), ("keep.txt", "k")], &[]);
     let bm = scan(&b);
     let wm = scan(&w);

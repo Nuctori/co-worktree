@@ -5,9 +5,9 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
+use cowt_core::manifest::Manifest;
 use cowt_core::merge;
 use cowt_core::overlay;
-use cowt_core::manifest::{Manifest};
 use tempfile::TempDir;
 
 fn write(root: &Path, rel: &str, content: &str) {
@@ -47,7 +47,9 @@ fn d1_full_differential_merge_keeps_and_conflicts() {
     let base = tmp.path().join("base");
     let host = tmp.path().join("host");
     let upper = tmp.path().join("upper");
-    for d in [&base, &host, &upper] { fs::create_dir_all(d).unwrap(); }
+    for d in [&base, &host, &upper] {
+        fs::create_dir_all(d).unwrap();
+    }
     write(&base, "keep.txt", "base");
     write(&base, "mod.txt", "base");
     write(&base, "del.txt", "base");
@@ -63,14 +65,28 @@ fn d1_full_differential_merge_keeps_and_conflicts() {
     let work = overlay::effective_manifest_fold(&base_m, &upper, false).unwrap();
     let host_m = scan(&host);
     let plan = merge::plan(&base_m, &host_m, &work, &upper);
-    assert!(plan.conflicts.iter().any(|c| c.path == Path::new("del.txt")
-        && c.kind == merge::ConflictKind::DeleteVsModify), "del.txt must conflict: {:?}", plan.conflicts);
-    assert!(plan.kept.contains(&PathBuf::from("keep.txt")), "keep.txt must be kept");
+    assert!(
+        plan.conflicts.iter().any(
+            |c| c.path == Path::new("del.txt") && c.kind == merge::ConflictKind::DeleteVsModify
+        ),
+        "del.txt must conflict: {:?}",
+        plan.conflicts
+    );
+    assert!(
+        plan.kept.contains(&PathBuf::from("keep.txt")),
+        "keep.txt must be kept"
+    );
     assert!(!plan.is_clean());
     let err = merge::execute(&plan, &host).unwrap_err();
     assert!(err.to_string().contains("conflict"));
-    assert_eq!(fs::read_to_string(host.join("keep.txt")).unwrap(), "HOST-KEEP");
-    assert_eq!(fs::read_to_string(host.join("mod.txt")).unwrap(), "HOST-MOD");
+    assert_eq!(
+        fs::read_to_string(host.join("keep.txt")).unwrap(),
+        "HOST-KEEP"
+    );
+    assert_eq!(
+        fs::read_to_string(host.join("mod.txt")).unwrap(),
+        "HOST-MOD"
+    );
 }
 
 /// D-2: verify_unchanged catches a forged host file (same size+mtime,
@@ -82,7 +98,9 @@ fn d2_verify_unchanged_catches_forged_content() {
     let base = tmp.path().join("base");
     let upper = tmp.path().join("upper");
     let host = tmp.path().join("host");
-    for d in [&base, &upper, &host] { fs::create_dir_all(d).unwrap(); }
+    for d in [&base, &upper, &host] {
+        fs::create_dir_all(d).unwrap();
+    }
     write(&base, "f.txt", "AAAA\n");
     write(&upper, "f.txt", "BBBB\n");
     copy_tree(&base, &host);
@@ -93,11 +111,17 @@ fn d2_verify_unchanged_catches_forged_content() {
     // Forge: same 4-byte size, different content, mtime aligned to base.
     write(&host, "f.txt", "ZZZZ\n");
     let base_meta = fs::metadata(base.join("f.txt")).unwrap();
-    let _ = fs::OpenOptions::new().write(true).open(host.join("f.txt")).unwrap()
+    let _ = fs::OpenOptions::new()
+        .write(true)
+        .open(host.join("f.txt"))
+        .unwrap()
         .set_times(std::fs::FileTimes::new().set_modified(base_meta.modified().unwrap()));
     let err = merge::execute(&plan, &host).unwrap_err();
-    assert!(err.to_string().contains("host path changed") || err.to_string().contains("changed after planning"),
-        "forged host file must abort: {err}");
+    assert!(
+        err.to_string().contains("host path changed")
+            || err.to_string().contains("changed after planning"),
+        "forged host file must abort: {err}"
+    );
     assert_eq!(fs::read_to_string(host.join("f.txt")).unwrap(), "ZZZZ\n");
 }
 
@@ -108,7 +132,9 @@ fn d3_file_to_dir_migration_delete_ordering() {
     let base = tmp.path().join("base");
     let upper = tmp.path().join("upper");
     let host = tmp.path().join("host");
-    for d in [&base, &upper, &host] { fs::create_dir_all(d).unwrap(); }
+    for d in [&base, &upper, &host] {
+        fs::create_dir_all(d).unwrap();
+    }
     write(&base, "x", "old");
     write(&upper, "x/inner.txt", "new");
     let base_m = scan(&base);
@@ -116,12 +142,19 @@ fn d3_file_to_dir_migration_delete_ordering() {
     copy_tree(&base, &host);
     let plan = merge::plan(&base_m, &scan(&host), &work, &upper);
     assert!(plan.is_clean(), "file->dir clean: {:?}", plan.conflicts);
-    let del_idx = plan.operations.iter().position(|o| matches!(
-        o, merge::Operation::Delete { path, migration: true } if path == Path::new("x")));
-    let mkdir_idx = plan.operations.iter().position(|o| matches!(
-        o, merge::Operation::Mkdir { path, .. } if path == Path::new("x")));
+    let del_idx = plan.operations.iter().position(|o| {
+        matches!(
+        o, merge::Operation::Delete { path, migration: true } if path == Path::new("x"))
+    });
+    let mkdir_idx = plan.operations.iter().position(|o| {
+        matches!(
+        o, merge::Operation::Mkdir { path, .. } if path == Path::new("x"))
+    });
     assert!(del_idx.is_some() && mkdir_idx.is_some());
-    assert!(del_idx.unwrap() < mkdir_idx.unwrap(), "migration delete before mkdir");
+    assert!(
+        del_idx.unwrap() < mkdir_idx.unwrap(),
+        "migration delete before mkdir"
+    );
     merge::execute(&plan, &host).unwrap();
     assert!(host.join("x").is_dir());
     assert_eq!(fs::read_to_string(host.join("x/inner.txt")).unwrap(), "new");
@@ -135,7 +168,9 @@ fn d4_apply_then_apply_again_converges() {
     let upper1 = tmp.path().join("upper1");
     let upper2 = tmp.path().join("upper2");
     let host = tmp.path().join("host");
-    for d in [&base, &upper1, &upper2, &host] { fs::create_dir_all(d).unwrap(); }
+    for d in [&base, &upper1, &upper2, &host] {
+        fs::create_dir_all(d).unwrap();
+    }
     write(&base, "a.txt", "v1");
     write(&base, "b.txt", "v2");
     write(&upper1, "a.txt", "v1a");
@@ -151,7 +186,11 @@ fn d4_apply_then_apply_again_converges() {
     let current = scan(&host);
     let work2 = overlay::effective_manifest_fold(&current, &upper2, false).unwrap();
     let plan2 = merge::plan(&current, &scan(&host), &work2, &upper2);
-    assert!(plan2.is_clean(), "second apply clean: {:?}", plan2.conflicts);
+    assert!(
+        plan2.is_clean(),
+        "second apply clean: {:?}",
+        plan2.conflicts
+    );
     merge::execute(&plan2, &host).unwrap();
     assert_eq!(fs::read_to_string(host.join("b.txt")).unwrap(), "v2b");
     assert!(!host.join("c.txt").exists(), "second change deleted c.txt");
@@ -164,7 +203,9 @@ fn d5_empty_dir_addition_round_trip() {
     let base = tmp.path().join("base");
     let upper = tmp.path().join("upper");
     let host = tmp.path().join("host");
-    for d in [&base, &upper, &host] { fs::create_dir_all(d).unwrap(); }
+    for d in [&base, &upper, &host] {
+        fs::create_dir_all(d).unwrap();
+    }
     write(&base, "a.txt", "v1");
     fs::create_dir_all(upper.join("emptydir")).unwrap();
     let base_m = scan(&base);
@@ -185,7 +226,9 @@ fn d6_dir_to_file_migration_with_host_only_child_conflicts() {
     let base = tmp.path().join("base");
     let upper = tmp.path().join("upper");
     let host = tmp.path().join("host");
-    for d in [&base, &upper, &host] { fs::create_dir_all(d).unwrap(); }
+    for d in [&base, &upper, &host] {
+        fs::create_dir_all(d).unwrap();
+    }
     write(&base, "x/known.txt", "base");
     copy_tree(&base, &host);
     write(&host, "x/hostonly.txt", "host added");
@@ -193,7 +236,15 @@ fn d6_dir_to_file_migration_with_host_only_child_conflicts() {
     let base_m = scan(&base);
     let work = overlay::effective_manifest_fold(&base_m, &upper, false).unwrap();
     let plan = merge::plan(&base_m, &scan(&host), &work, &upper);
-    assert!(!plan.is_clean(), "non-empty host dir migration must conflict");
-    assert!(plan.conflicts.iter().any(|c| c.path == Path::new("x/hostonly.txt")),
-        "host-only child conflict: {:?}", plan.conflicts);
+    assert!(
+        !plan.is_clean(),
+        "non-empty host dir migration must conflict"
+    );
+    assert!(
+        plan.conflicts
+            .iter()
+            .any(|c| c.path == Path::new("x/hostonly.txt")),
+        "host-only child conflict: {:?}",
+        plan.conflicts
+    );
 }

@@ -320,7 +320,7 @@ fn r5_case_fold_is_equivalence() {
 #[test]
 fn r5_content_eq_mode_is_content() {
     use cowt_core::manifest::Entry;
-    let mut f1 = Entry {
+    let f1 = Entry {
         kind: EntryKind::File,
         size: 1,
         mode: 0o644,

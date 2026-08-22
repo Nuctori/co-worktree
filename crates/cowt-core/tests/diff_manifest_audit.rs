@@ -4,7 +4,7 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use cowt_core::diff;
-use cowt_core::manifest::Manifest;
+use cowt_core::manifest::{EntryKind, Manifest};
 use tempfile::TempDir;
 
 fn write(root: &Path, rel: &str, content: &str) {

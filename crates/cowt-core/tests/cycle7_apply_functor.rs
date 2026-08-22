@@ -26,8 +26,7 @@ use tempfile::TempDir;
 // ── helpers (borrowed from cycle6) ───────────────────────────────────────
 fn write_file(root: &Path, rel: &str, content: &str) {
     let p = root.join(rel);
-    if p
-        .parent()
+    if p.parent()
         .map(|pp| fs::create_dir_all(pp).is_err())
         .unwrap_or(true)
     {
@@ -61,8 +60,7 @@ fn whiteout(upper: &Path, rel: &str) {
 #[cfg(unix)]
 fn write_symlink(root: &Path, rel: &str, target: &str) {
     let p = root.join(rel);
-    if p
-        .parent()
+    if p.parent()
         .map(|pp| fs::create_dir_all(pp).is_err())
         .unwrap_or(true)
     {
@@ -161,7 +159,10 @@ fn build_upper(upper: &Path, idx: usize, k: BaseKind, act: Action, opaque_dirs: 
     let relp = Path::new(rel);
     // Children of an opaque directory are shadowed; whiteout them so the
     // deletion is explicit.
-    if opaque_dirs.iter().any(|d| relp != d.as_path() && relp.starts_with(d)) {
+    if opaque_dirs
+        .iter()
+        .any(|d| relp != d.as_path() && relp.starts_with(d))
+    {
         if effective_base_kind(k) != BaseKind::Absent {
             whiteout(upper, rel);
         }
@@ -232,9 +233,7 @@ fn assert_same_tree(host: &Manifest, work: &Manifest) -> Result<(), Vec<String>>
             (None, Some(_)) => errs.push(format!("missing on host, in work: {k:?}")),
             (Some(h), Some(w)) => {
                 if !h.content_eq(w) {
-                    errs.push(format!(
-                        "content mismatch at {k:?}: host={h:?} work={w:?}"
-                    ));
+                    errs.push(format!("content mismatch at {k:?}: host={h:?} work={w:?}"));
                 }
             }
         }
@@ -354,10 +353,16 @@ fn a7_opaque_dir_realizes_exactly() {
     let work = overlay::effective_manifest_fold(&base_m, &upper, false).unwrap();
     copy_tree(&base, &host);
     let plan = merge::plan(&base_m, &scan(&host), &work, &upper);
-    assert!(plan.is_clean(), "opaque plan must be clean: {:?}", plan.conflicts);
+    assert!(
+        plan.is_clean(),
+        "opaque plan must be clean: {:?}",
+        plan.conflicts
+    );
     merge::execute(&plan, &host).unwrap();
     let host_scan = scan(&host);
-    let errs = assert_same_tree(&host_scan, &work).err().unwrap_or_default();
+    let errs = assert_same_tree(&host_scan, &work)
+        .err()
+        .unwrap_or_default();
     assert!(errs.is_empty(), "A7 opaque violated: {errs:?}");
     assert!(host.join("dir/c.txt").exists());
     assert!(!host.join("dir/deep/z.txt").exists());
@@ -386,7 +391,9 @@ fn a7_symlink_recreate_as_file() {
     assert!(plan.is_clean());
     merge::execute(&plan, &host).unwrap();
     let host_scan = scan(&host);
-    let errs = assert_same_tree(&host_scan, &work).err().unwrap_or_default();
+    let errs = assert_same_tree(&host_scan, &work)
+        .err()
+        .unwrap_or_default();
     assert!(errs.is_empty(), "A7 symlink->file violated: {errs:?}");
     assert!(host.join("x").is_file());
 }
@@ -409,10 +416,16 @@ fn a7_recreate_file_as_dir_with_child() {
     let work = overlay::effective_manifest_fold(&base_m, &upper, false).unwrap();
     copy_tree(&base, &host);
     let plan = merge::plan(&base_m, &scan(&host), &work, &upper);
-    assert!(plan.is_clean(), "file->dir plan must be clean: {:?}", plan.conflicts);
+    assert!(
+        plan.is_clean(),
+        "file->dir plan must be clean: {:?}",
+        plan.conflicts
+    );
     merge::execute(&plan, &host).unwrap();
     let host_scan = scan(&host);
-    let errs = assert_same_tree(&host_scan, &work).err().unwrap_or_default();
+    let errs = assert_same_tree(&host_scan, &work)
+        .err()
+        .unwrap_or_default();
     assert!(errs.is_empty(), "A7 file->dir violated: {errs:?}");
     assert!(host.join("x/child.txt").is_file());
 }

@@ -34,8 +34,7 @@ use tempfile::TempDir;
 /// is already a file, skip the entry rather than crash.
 fn write(root: &Path, rel: &str, content: &str) {
     let p = root.join(rel);
-    if p
-        .parent()
+    if p.parent()
         .map(|pp| fs::create_dir_all(pp).is_err())
         .unwrap_or(true)
     {
@@ -145,17 +144,19 @@ fn a1_round_trip(
     }
 
     for (i, p) in base_paths.iter().enumerate() {
-        let c = base_content.get(i).cloned().unwrap_or_else(|| {
-            format!("base-{}-{}", p.display(), i)
-        });
+        let c = base_content
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| format!("base-{}-{}", p.display(), i));
         write(&base_dir, &p.to_string_lossy(), &c);
     }
 
     // Adds: brand-new files in upper (may create new nested dirs).
     for (i, p) in add_paths.iter().enumerate() {
-        let c = add_content.get(i).cloned().unwrap_or_else(|| {
-            format!("add-{}-{}", p.display(), i)
-        });
+        let c = add_content
+            .get(i)
+            .cloned()
+            .unwrap_or_else(|| format!("add-{}-{}", p.display(), i));
         write(&upper, &p.to_string_lossy(), &c);
     }
 
@@ -196,9 +197,7 @@ fn a1_round_trip(
         }
         let p = &base_paths[idx % base_paths.len()];
         let parent = p.parent().unwrap_or_else(|| Path::new(""));
-        let marker = upper
-            .join(parent)
-            .join(".wh..wh..opq");
+        let marker = upper.join(parent).join(".wh..wh..opq");
         if marker
             .parent()
             .map(|pp| fs::create_dir_all(pp).is_err())
@@ -210,8 +209,7 @@ fn a1_round_trip(
     }
 
     let base_m = scan(&base_dir);
-    let work = overlay::effective_manifest_fold(&base_m, &upper, false)
-        .expect("fold must succeed");
+    let work = overlay::effective_manifest_fold(&base_m, &upper, false).expect("fold must succeed");
 
     let d1 = diff::diff(&base_m, &work);
     let sig1 = diff_signature(&d1);
@@ -260,21 +258,11 @@ fn a3_check(a_dir: &Path, b_dir: &Path) {
 
     let set_ab: BTreeSet<(char, String)> = d_ab
         .iter()
-        .map(|c| {
-            (
-                sign(c),
-                c.path.to_string_lossy().replace('\\', "/"),
-            )
-        })
+        .map(|c| (sign(c), c.path.to_string_lossy().replace('\\', "/")))
         .collect();
     let set_ba: BTreeSet<(char, String)> = d_ba
         .iter()
-        .map(|c| {
-            (
-                invert(sign(c)),
-                c.path.to_string_lossy().replace('\\', "/"),
-            )
-        })
+        .map(|c| (invert(sign(c)), c.path.to_string_lossy().replace('\\', "/")))
         .collect();
 
     assert_eq!(
@@ -436,7 +424,11 @@ proptest! {
 #[test]
 fn a1_modify_delete_add_same_dir() {
     a1_round_trip(
-        &[PathBuf::from("a.txt"), PathBuf::from("b.txt"), PathBuf::from("c.txt")],
+        &[
+            PathBuf::from("a.txt"),
+            PathBuf::from("b.txt"),
+            PathBuf::from("c.txt"),
+        ],
         &["v1".into(), "v1".into(), "v1".into()],
         &[PathBuf::from("d.txt")],
         &["new".into()],

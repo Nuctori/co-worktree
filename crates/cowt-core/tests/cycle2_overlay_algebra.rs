@@ -29,8 +29,7 @@ use tempfile::TempDir;
 
 fn write(root: &Path, rel: &str, content: &str) {
     let p = root.join(rel);
-    if p
-        .parent()
+    if p.parent()
         .map(|pp| fs::create_dir_all(pp).is_err())
         .unwrap_or(true)
     {
@@ -60,8 +59,7 @@ fn whiteout(upper: &Path, name: &str) {
 
 fn opaque_marker(upper: &Path, dir: &str) {
     let p = upper.join(dir).join(".wh..wh..opq");
-    if p
-        .parent()
+    if p.parent()
         .map(|pp| fs::create_dir_all(pp).is_err())
         .unwrap_or(true)
     {
@@ -94,8 +92,7 @@ fn path_key_set(m: &Manifest) -> std::collections::BTreeSet<String> {
 }
 
 fn leaf_name() -> impl Strategy<Value = String> {
-    prop::collection::vec(prop::char::range('a', 'z'), 1..4)
-        .prop_map(|v| v.into_iter().collect())
+    prop::collection::vec(prop::char::range('a', 'z'), 1..4).prop_map(|v| v.into_iter().collect())
 }
 
 /// (leaf, owner): owner 0 = base-only, 1 = owned by layer A, 2 = owned by B.
@@ -405,7 +402,10 @@ fn a9_zero_size_file_opaque_marker_works() {
     // Marker is explicitly a zero-size regular file (verified below).
     opaque_marker(&upper, "sub");
     let meta = fs::symlink_metadata(upper.join("sub/.wh..wh..opq")).unwrap();
-    assert!(meta.is_file() && meta.len() == 0, "fixture marker must be zero-size file");
+    assert!(
+        meta.is_file() && meta.len() == 0,
+        "fixture marker must be zero-size file"
+    );
 
     let base = scan(&base_dir);
     let folded = overlay::effective_manifest_fold(&base, &upper, false).unwrap();

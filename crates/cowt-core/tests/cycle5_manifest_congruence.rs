@@ -100,7 +100,10 @@ fn a5_mode_is_content_byte_equal() {
     let b = mk(0o600); // identical bytes, chmod-only difference
     assert!(a.content_eq(&a), "reflexive baseline");
     assert!(!a.content_eq(&b), "mode-only change must break content_eq");
-    assert!(!b.content_eq(&a), "mode-only change must break content_eq (symmetric)");
+    assert!(
+        !b.content_eq(&a),
+        "mode-only change must break content_eq (symmetric)"
+    );
 }
 
 /// On platforms without unix mode, byte-identical files (equal hash/size) are
@@ -186,7 +189,10 @@ fn a5_congruence_equal_content_equal_hash() {
     let hx = ex.hash.clone().unwrap();
     let hy = ey.hash.clone().unwrap();
     assert_eq!(hx, hy, "equal content => equal hash (congruence)");
-    assert!(ex.content_eq(ey), "equal content entries must be content_eq");
+    assert!(
+        ex.content_eq(ey),
+        "equal content entries must be content_eq"
+    );
 }
 
 /// The hash is a faithful function: different bytes must produce different
